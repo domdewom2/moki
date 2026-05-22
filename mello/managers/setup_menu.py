@@ -14,7 +14,7 @@ import shutil
 
 from pathlib import Path
 
-from ..config import CATALOG_PATH, IMAGES_DIR, LIBRESPOT_STATE_PATH, SETTINGS_PATH
+from ..config import CATALOG_PATH, IMAGES_DIR, LIBRESPOT_STATE_PATH, SETTINGS_PATH, PIN_LENGTH
 from ..models import MenuState
 
 _REPO_DIR = str(Path(__file__).resolve().parent.parent.parent)
@@ -37,6 +37,8 @@ class SetupMenu:
         on_library_cleared: Callable[[], None],
         bluetooth_manager=None,
         on_volume_preview: Optional[Callable[[int, str, int], None]] = None,
+        on_open_home: Optional[Callable[[], None]] = None,
+        on_prepare_shutdown: Optional[Callable[[], None]] = None,
     ):
         self.catalog_manager = catalog_manager
         self.settings = settings
@@ -45,6 +47,8 @@ class SetupMenu:
         self._on_library_cleared = on_library_cleared
         self.bluetooth = bluetooth_manager
         self._on_volume_preview = on_volume_preview
+        self._on_open_home = on_open_home or (lambda: None)
+        self._on_prepare_shutdown = on_prepare_shutdown or (lambda: None)
 
         self.state = MenuState.CLOSED
         self.scroll_offset: int = 0  # pixels scrolled in current menu screen
@@ -57,19 +61,50 @@ class SetupMenu:
         self._reset_confirm_pending: bool = False
         self._reset_confirm_time: float = 0.0
 
+        # Shutdown confirmation state
+        self._shutdown_confirm_pending: bool = False
+        self._shutdown_confirm_time: float = 0.0
+
         # Manual update state
         self._update_available: bool = False
         self._update_checking: bool = False
         self._update_running: bool = False
         self._update_process: Optional[subprocess.Popen] = None
 
+        # PIN entry state
+        self._pin_buffer: str = ''
+        self._change_pin_step: int = 0
+        self._pending_new_pin: Optional[str] = None
+
+    @property
+    def pin_buffer(self) -> str:
+        return self._pin_buffer
+
+    @property
+    def change_pin_step(self) -> int:
+        return self._change_pin_step
+
     @property
     def is_open(self) -> bool:
         return self.state != MenuState.CLOSED
 
+    def _reset_pin_state(self):
+        self._pin_buffer = ''
+        self._change_pin_step = 0
+        self._pending_new_pin = None
+
+    def open_with_pin(self):
+        """Open settings behind a PIN gate."""
+        logger.info('Setup menu: PIN entry')
+        self._reset_pin_state()
+        self.state = MenuState.PIN_ENTRY
+        self.scroll_offset = 0
+        self._on_invalidate()
+
     def open(self):
-        """Open the setup menu overlay."""
+        """Open the setup menu overlay (admin bypass, no PIN)."""
         logger.info('Setup menu opened')
+        self._reset_pin_state()
         self.state = MenuState.MAIN
         self.scroll_offset = 0
         self.current_network = None
@@ -91,6 +126,8 @@ class SetupMenu:
         if self.bluetooth and self.state == MenuState.BT_LIST:
             self.bluetooth.stop_scan()
         self._reset_confirm_pending = False
+        self._shutdown_confirm_pending = False
+        self._reset_pin_state()
         self.state = MenuState.CLOSED
         self.current_network = None
         self._on_invalidate()
@@ -100,7 +137,14 @@ class SetupMenu:
         x, y = pos
 
         if 'close' in button_rects and button_rects['close'].collidepoint(x, y):
-            if self.state == MenuState.MAIN:
+            if self.state == MenuState.PIN_ENTRY:
+                self.close()
+            elif self.state == MenuState.CHANGE_PIN:
+                self._reset_pin_state()
+                self.state = MenuState.MAIN
+                self.scroll_offset = 0
+                self._on_invalidate()
+            elif self.state == MenuState.MAIN:
                 self.close()
             elif self.state == MenuState.WIFI_AP:
                 self._restore_wifi_autoconnect()
@@ -120,6 +164,10 @@ class SetupMenu:
                 self._on_invalidate()
             return
 
+        if self.state in (MenuState.PIN_ENTRY, MenuState.CHANGE_PIN):
+            self._handle_pin_tap(button_rects, x, y)
+            return
+
         if self.state == MenuState.VOLUME_LEVELS:
             self._handle_volume_tap(button_rects, x, y)
         elif self.state == MenuState.BT_LIST:
@@ -132,19 +180,35 @@ class SetupMenu:
         elif self.state == MenuState.WIFI_AP:
             self._check_reconnect_tap(button_rects, x, y)
         else:
+            if 'shutdown' in button_rects and button_rects['shutdown'].collidepoint(x, y):
+                if self._shutdown_confirm_pending:
+                    self._shutdown_confirm_pending = False
+                    self._shutdown_system()
+                else:
+                    self._reset_confirm_pending = False
+                    self._shutdown_confirm_pending = True
+                    self._shutdown_confirm_time = time.time()
+                    self._on_invalidate()
+                return
             if 'reset' in button_rects and button_rects['reset'].collidepoint(x, y):
                 if self._reset_confirm_pending:
                     self._reset_confirm_pending = False
                     self._factory_reset()
                 else:
+                    self._shutdown_confirm_pending = False
                     self._reset_confirm_pending = True
                     self._reset_confirm_time = time.time()
                     self._on_invalidate()
                 return
-            # Any other tap in main menu clears reset confirmation
-            if self._reset_confirm_pending:
+            # Any other tap in main menu clears destructive confirmations
+            if self._reset_confirm_pending or self._shutdown_confirm_pending:
                 self._reset_confirm_pending = False
+                self._shutdown_confirm_pending = False
                 self._on_invalidate()
+            if 'home' in button_rects and button_rects['home'].collidepoint(x, y):
+                self.close()
+                self._on_open_home()
+                return
             if 'wifi' in button_rects and button_rects['wifi'].collidepoint(x, y):
                 self._show_wifi_screen()
             elif 'bluetooth' in button_rects and button_rects['bluetooth'].collidepoint(x, y):
@@ -159,6 +223,11 @@ class SetupMenu:
                 self._on_invalidate()
             elif 'volume' in button_rects and button_rects['volume'].collidepoint(x, y):
                 self.state = MenuState.VOLUME_LEVELS
+                self.scroll_offset = 0
+                self._on_invalidate()
+            elif 'change_pin' in button_rects and button_rects['change_pin'].collidepoint(x, y):
+                self._reset_pin_state()
+                self.state = MenuState.CHANGE_PIN
                 self.scroll_offset = 0
                 self._on_invalidate()
             elif 'check_update' in button_rects and button_rects['check_update'].collidepoint(x, y):
@@ -176,9 +245,12 @@ class SetupMenu:
 
     def update(self):
         """Called each frame to detect wifi-connect / update exit."""
-        # Auto-clear reset confirmation after 4 seconds
+        # Auto-clear destructive confirmations after 4 seconds
         if self._reset_confirm_pending and time.time() - self._reset_confirm_time > 4:
             self._reset_confirm_pending = False
+            self._on_invalidate()
+        if self._shutdown_confirm_pending and time.time() - self._shutdown_confirm_time > 4:
+            self._shutdown_confirm_pending = False
             self._on_invalidate()
 
         # Monitor manual update process
@@ -205,6 +277,66 @@ class SetupMenu:
                     logger.info(f'wifi-connect exited (code={ret})')
                     self._reconnect_to_known_network()
                     self._show_wifi_screen()
+
+    # ------------------------------------------------------------------
+    # PIN entry
+    # ------------------------------------------------------------------
+
+    def _handle_pin_tap(self, button_rects: dict, x: int, y: int):
+        for key, rect in button_rects.items():
+            if not key.startswith('pin_') or not rect.collidepoint(x, y):
+                continue
+            suffix = key[4:]
+            if suffix == 'back':
+                self._pin_buffer = self._pin_buffer[:-1]
+            elif suffix == 'ok':
+                self._submit_pin()
+            elif suffix.isdigit() and len(suffix) == 1:
+                if len(self._pin_buffer) < PIN_LENGTH:
+                    self._pin_buffer += suffix
+                    if len(self._pin_buffer) == PIN_LENGTH:
+                        self._submit_pin()
+            self._on_invalidate()
+            return
+
+    def _submit_pin(self):
+        if len(self._pin_buffer) != PIN_LENGTH:
+            return
+
+        entered = self._pin_buffer
+        self._pin_buffer = ''
+
+        if self.state == MenuState.PIN_ENTRY:
+            if entered == self.settings.admin_pin:
+                logger.info('PIN entry accepted')
+                self.state = MenuState.MAIN
+                self.scroll_offset = 0
+            else:
+                logger.info('PIN entry rejected')
+                self._on_toast('Wrong code')
+            self._on_invalidate()
+            return
+
+        if self.state == MenuState.CHANGE_PIN:
+            if self._change_pin_step == 0:
+                if entered == self.settings.admin_pin:
+                    self._change_pin_step = 1
+                else:
+                    self._on_toast('Wrong code')
+            elif self._change_pin_step == 1:
+                self._pending_new_pin = entered
+                self._change_pin_step = 2
+            elif self._change_pin_step == 2:
+                if entered == self._pending_new_pin:
+                    self.settings.set_admin_pin(entered)
+                    self._on_toast('PIN changed')
+                    self._reset_pin_state()
+                    self.state = MenuState.MAIN
+                else:
+                    self._on_toast('PINs do not match')
+                    self._pending_new_pin = None
+                    self._change_pin_step = 1
+            self._on_invalidate()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -527,6 +659,7 @@ class SetupMenu:
             con_name = self._ssid_to_con_name.get(ssid, ssid)
             logger.info(f'Auto-reconnecting to known network: {ssid} (con: {con_name})')
             try:
+                self._force_wifi_24ghz(con_name)
                 subprocess.Popen(
                     ['sudo', 'nmcli', 'con', 'up', con_name],
                     stdout=subprocess.DEVNULL,
@@ -546,6 +679,7 @@ class SetupMenu:
             self._wifi_process = None
 
         try:
+            self._force_wifi_24ghz(con_name)
             subprocess.Popen(
                 ['sudo', 'nmcli', 'con', 'up', con_name],
                 stdout=subprocess.DEVNULL,
@@ -557,6 +691,16 @@ class SetupMenu:
             self._on_toast('Connection failed')
 
         self.close()
+
+    def _force_wifi_24ghz(self, con_name: str):
+        """Prefer 2.4 GHz for better range through walls on Pi 3 WiFi."""
+        try:
+            subprocess.run(
+                ['sudo', 'nmcli', 'con', 'modify', con_name, '802-11-wireless.band', 'bg'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+            )
+        except Exception as e:
+            logger.warning(f'Could not force WiFi profile to 2.4 GHz: {e}')
 
     def _factory_reset(self):
         """Full factory reset: catalog, settings, Spotify, Bluetooth, WiFi."""
@@ -652,4 +796,25 @@ class SetupMenu:
         threading.Thread(target=_restart_app, daemon=True).start()
 
         self._on_toast('Reset complete')
+        self.close()
+
+    def _shutdown_system(self):
+        """Gracefully save state and power off the Pi."""
+        logger.info('Setup menu: Shutdown confirmed')
+        self._on_prepare_shutdown()
+        self._on_toast('Shutting down...')
+        self._on_invalidate()
+
+        def _poweroff():
+            time.sleep(1.5)
+            try:
+                subprocess.run(
+                    ['sudo', '/usr/bin/systemctl', 'poweroff'],
+                    timeout=15,
+                )
+            except Exception as ex:
+                logger.error(f'Shutdown failed: {ex}')
+                self._on_toast('Shutdown failed')
+
+        threading.Thread(target=_poweroff, daemon=True).start()
         self.close()

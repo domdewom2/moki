@@ -45,6 +45,7 @@ PROGRESS_PATH = DATA_DIR / 'progress.json'
 SETTINGS_PATH = DATA_DIR / 'settings.json'
 IMAGES_DIR = DATA_DIR / 'images'
 ICONS_DIR = Path(__file__).parent.parent / 'icons'
+ASSETS_DIR = Path(__file__).parent.parent / 'assets'
 LIBRESPOT_STATE_PATH = Path.home() / '.config' / 'go-librespot' / 'state.json'
 
 # Logging directory
@@ -112,6 +113,36 @@ BTN_SPACING = (COVER_SIZE - BTN_SIZE) // 2  # 155px
 
 # Progress bar (now vertical on physical screen)
 PROGRESS_BAR_WIDTH = 8
+
+# ============================================
+# HOME SCREEN
+# ============================================
+
+# Home icon position in physical screen coords (see config layout comments).
+# Small X = user's bottom, large X = user's top; Y = user's horizontal axis.
+HOME_ICON_SIZE = 196  # 30% smaller than original 280
+HOME_ICON_SCREEN_X_FRAC = 0.32
+HOME_ICON_SCREEN_Y_FRAC = 0.50
+HOME_CHECKER_ICON_SCREEN_Y_FRAC = 0.30
+HOME_SETTINGS_ICON_SCREEN_Y_FRAC = 0.70
+HOME_ICON_HIT_PADDING = 20
+
+# Admin PIN for settings app (4 digits, stored in settings.json)
+PIN_LENGTH = 4
+DEFAULT_ADMIN_PIN = '0000'
+
+# ============================================
+# CHECKPOD (Checker Tobi / ARD Sounds)
+# ============================================
+
+CHECKPOD_ARD_SHOW_ID = 'urn:ard:show:2af809299201a921'
+CHECKPOD_CACHE_DIR = DATA_DIR / 'checkpod'
+CHECKPOD_CATALOG_PATH = CHECKPOD_CACHE_DIR / 'catalog.json'
+CHECKPOD_PROGRESS_PATH = CHECKPOD_CACHE_DIR / 'progress.json'
+CHECKPOD_IMAGES_DIR = CHECKPOD_CACHE_DIR / 'images'
+CHECKPOD_EPISODE_LIMIT = 30
+CHECKPOD_IMAGE_PATH_PREFIX = '/checkpod/images/'
+MPV_SOCKET_PATH = '/tmp/mello-mpv.sock'
 
 # ============================================
 # VOLUME

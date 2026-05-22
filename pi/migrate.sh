@@ -758,6 +758,100 @@ _migrate_014() {
 }
 
 # ============================================
+# Migration 015: Allow passwordless shutdown from setup menu
+# ============================================
+_migrate_015() {
+  local SUDOERS="/etc/sudoers.d/mello-wifi"
+  if [ ! -f "$SUDOERS" ]; then
+    log "sudoers file not found, skipping"
+    return
+  fi
+  if sudo grep -q 'systemctl poweroff' "$SUDOERS"; then
+    log "sudoers already has systemctl poweroff, skipping"
+    return
+  fi
+  local TMP="/tmp/mello-sudoers-015.$$"
+  sudo sed 's|$|, /usr/bin/systemctl poweroff|' "$SUDOERS" > "$TMP"
+  if sudo visudo -cf "$TMP"; then
+    sudo install -m 440 "$TMP" "$SUDOERS"
+    log "sudoers updated: added systemctl poweroff"
+  else
+    log "ERROR: sudoers validation failed, skipping"
+  fi
+  rm -f "$TMP"
+}
+
+# ============================================
+# Migration 016: Install mpv for CheckPod local playback
+# ============================================
+_migrate_016() {
+  if command -v mpv >/dev/null 2>&1; then
+    log "mpv already installed, skipping"
+    return
+  fi
+  sudo apt-get install -y mpv
+  log "Installed mpv for CheckPod playback"
+}
+
+# ============================================
+# Migration 017: Disable WiFi power save for reliable SSH/Spotify
+# ============================================
+_migrate_017() {
+  sudo mkdir -p /etc/NetworkManager/conf.d
+  cat << 'EOF' | sudo tee /etc/NetworkManager/conf.d/99-mello-wifi-powersave.conf > /dev/null
+[connection]
+wifi.powersave = 2
+EOF
+
+  # Apply immediately without dropping the active connection if iw is available.
+  sudo iw dev wlan0 set power_save off 2>/dev/null || true
+  sudo systemctl reload NetworkManager 2>/dev/null || true
+  log "WiFi power save disabled for stable SSH/Spotify during display sleep"
+}
+
+# ============================================
+# Migration 018: Allow app to keep WiFi awake during sleep
+# ============================================
+_migrate_018() {
+  local SUDOERS="/etc/sudoers.d/mello-wifi"
+  if [ ! -f "$SUDOERS" ]; then
+    log "sudoers file not found, skipping"
+    return
+  fi
+  if sudo grep -q '/usr/sbin/iw' "$SUDOERS"; then
+    log "sudoers already has iw, skipping"
+    return
+  fi
+  local TMP="/tmp/mello-sudoers-018.$$"
+  sudo sed 's|/usr/bin/nmcli|/usr/bin/nmcli, /usr/sbin/iw|' "$SUDOERS" > "$TMP"
+  if sudo visudo -cf "$TMP"; then
+    sudo install -m 440 "$TMP" "$SUDOERS"
+    log "sudoers updated: added iw for WiFi power-save recovery"
+  else
+    log "ERROR: sudoers validation failed, skipping"
+  fi
+  rm -f "$TMP"
+}
+
+# ============================================
+# Migration 019: Prefer 2.4 GHz WiFi for better range
+# ============================================
+_migrate_019() {
+  local changed=0
+  while IFS=: read -r con_name con_type _; do
+    if [ "$con_type" = "802-11-wireless" ]; then
+      sudo nmcli con modify "$con_name" 802-11-wireless.band bg 2>/dev/null || true
+      log "WiFi profile forced to 2.4 GHz: $con_name"
+      changed=1
+    fi
+  done < <(nmcli -t -f NAME,TYPE con show 2>/dev/null || true)
+
+  if [ "$changed" -eq 0 ]; then
+    log "No WiFi profiles found to force to 2.4 GHz"
+  fi
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -774,3 +868,8 @@ run_migration "011" "Converge Raspberry Pi Touch Display 2 boot config"
 run_migration "012" "Reboot after display boot config changes"
 run_migration "013" "Disable Spotify suggested autoplay"
 run_migration "014" "Keep librespot independent of UI sleep/restarts"
+run_migration "015" "Allow passwordless shutdown from setup menu"
+run_migration "016" "Install mpv for CheckPod playback"
+run_migration "017" "Disable WiFi power save"
+run_migration "018" "Allow WiFi sleep recovery"
+run_migration "019" "Prefer 2.4 GHz WiFi"

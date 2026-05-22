@@ -85,7 +85,9 @@ Albums and playlists you play are automatically saved to the device. Kids can th
 
 ## Settings Menu
 
-> **How to open:** Press and hold the volume button for 3 seconds. There's no gear icon or visible button — the long-press on the volume button is the only way in.
+> **How to open:** Tap the **Settings** icon on the home screen and enter the PIN (default: `0000`). You can change the PIN under **Change PIN** in the settings menu.
+
+**Backup access:** Press and hold the volume button for 3 seconds to open settings without a PIN (hidden admin shortcut).
 
 Once open, you'll see a scrollable menu with these sections:
 
@@ -99,6 +101,7 @@ Once open, you'll see a scrollable menu with these sections:
 - **Remember progress** — How long Mello remembers where each album left off (12, 24, 48, or 96 hours). Tap to cycle. Default: 96 hours
 
 ### System
+- **Change PIN** — Update the 4-digit code used to open settings from the home screen
 - **Check for updates** — Manually check for and install updates (Mello also updates automatically each night)
 - **Reset** — Factory reset: clears all albums, WiFi, Bluetooth, Spotify credentials, and settings. Requires a second tap to confirm
 

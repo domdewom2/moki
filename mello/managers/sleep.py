@@ -18,7 +18,6 @@ class SleepManager:
     Sleep saves power by:
     - Turning off DSI backlight
     - Turning off HDMI/DSI via DRM DPMS
-    - Dropping CPU to minimum frequency (600MHz)
     - Turning off activity LED
     """
     
@@ -152,9 +151,8 @@ class SleepManager:
         self.is_sleeping = True
         self._sleep_started_at = time.time()
         self._set_display(False)
-        self._set_low_power_cpu(True)
         self._set_led(False)
-        logger.info(f'Sleep mode active (display off, CPU low, LED off, WiFi kept awake) diag_after={self._display_diag()}')
+        logger.info(f'Sleep mode active (display off, CPU normal, LED off, WiFi kept awake) diag_after={self._display_diag()}')
     
     def wake_up(self, reason: str = 'activity'):
         """Wake from sleep mode - restore full power."""

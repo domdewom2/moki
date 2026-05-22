@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from ..config import SETTINGS_PATH, DEFAULT_VOLUME_LEVELS, VOLUME_RANGE
+from ..config import SETTINGS_PATH, DEFAULT_VOLUME_LEVELS, VOLUME_RANGE, DEFAULT_ADMIN_PIN, PIN_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class Settings:
         self._last_bt_device_mac: Optional[str] = None
         self._volume_overrides: Optional[list] = None  # None = use defaults
         self._share_usage_data: bool = True  # Set once during install, not changeable via UI
+        self._admin_pin: str = DEFAULT_ADMIN_PIN
         self._load()
 
     def _load(self):
@@ -41,6 +42,9 @@ class Settings:
                 self._volume_overrides = data.get('volume_levels')
                 if 'share_usage_data' in data:
                     self._share_usage_data = bool(data['share_usage_data'])
+                pin = data.get('admin_pin', DEFAULT_ADMIN_PIN)
+                if isinstance(pin, str) and len(pin) == PIN_LENGTH and pin.isdigit():
+                    self._admin_pin = pin
                 logger.info(f'Settings loaded: auto_pause={self._auto_pause_minutes}min, expiry={self._progress_expiry_hours}h')
         except (json.JSONDecodeError, IOError, OSError) as e:
             logger.warning(f'Could not load settings, using defaults: {e}')
@@ -53,6 +57,7 @@ class Settings:
                 'progress_expiry_hours': self._progress_expiry_hours,
                 'last_bt_device_mac': self._last_bt_device_mac,
                 'share_usage_data': self._share_usage_data,
+                'admin_pin': self._admin_pin,
             }
             if self._volume_overrides is not None:
                 data['volume_levels'] = self._volume_overrides
@@ -149,3 +154,16 @@ class Settings:
         self._volume_overrides = None
         self._save()
         logger.info('Volume levels reset to defaults')
+
+    # --- Admin PIN ---
+
+    @property
+    def admin_pin(self) -> str:
+        return self._admin_pin
+
+    def set_admin_pin(self, pin: str):
+        if not (isinstance(pin, str) and len(pin) == PIN_LENGTH and pin.isdigit()):
+            raise ValueError(f'PIN must be {PIN_LENGTH} digits')
+        self._admin_pin = pin
+        self._save()
+        logger.info('Admin PIN updated')

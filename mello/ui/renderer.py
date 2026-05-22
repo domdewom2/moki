@@ -12,19 +12,21 @@ import pygame.gfxdraw
 from .helpers import draw_aa_circle
 from .image_cache import ImageCache
 from .context import RenderContext
-from ..models import CatalogItem, MenuState, NowPlaying
+from ..models import CatalogItem, MenuState, NowPlaying, AppScreen
 from ..config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, COLORS,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
     TRACK_INFO_X, CAROUSEL_X, CONTROLS_X, CAROUSEL_CENTER_Y,
     BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING, PROGRESS_BAR_WIDTH,
-    DEFAULT_VOLUME_LEVELS,
+    DEFAULT_VOLUME_LEVELS, HOME_ICON_SIZE, HOME_ICON_HIT_PADDING,
+    PIN_LENGTH,
 )
 
-# Headphone button Y position — symmetric to volume button on the opposite side.
+# Home button Y position — symmetric to volume button on the opposite side.
 # Volume: center_y + (COVER_SIZE + COVER_SPACING) + COVER_SIZE_SMALL//2 - BTN_SIZE//2 ≈ 1173
-# Headphone: center_y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL//2 + BTN_SIZE//2 ≈ 107
-_HEADPHONE_BTN_Y = CAROUSEL_CENTER_Y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
+# Home: center_y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL//2 + BTN_SIZE//2 ≈ 107
+_HOME_BTN_Y = CAROUSEL_CENTER_Y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
+_HEADPHONE_BTN_Y = _HOME_BTN_Y + BTN_SIZE + 20
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +34,29 @@ logger = logging.getLogger(__name__)
 class Renderer:
     """Handles all drawing/rendering for Mello UI."""
     
-    def __init__(self, screen: pygame.Surface, image_cache: ImageCache, icons: Dict[str, pygame.Surface]):
+    def __init__(
+        self,
+        screen: pygame.Surface,
+        image_cache: ImageCache,
+        icons: Dict[str, pygame.Surface],
+        home_background: Optional[pygame.Surface] = None,
+        home_musik_icon: Optional[pygame.Surface] = None,
+        home_musik_center: Optional[Tuple[int, int]] = None,
+        home_checker_icon: Optional[pygame.Surface] = None,
+        home_checker_center: Optional[Tuple[int, int]] = None,
+        home_settings_icon: Optional[pygame.Surface] = None,
+        home_settings_center: Optional[Tuple[int, int]] = None,
+    ):
         self.screen = screen
         self.image_cache = image_cache
         self.icons = icons
+        self._home_background = home_background
+        self._home_musik_icon = home_musik_icon
+        self._home_musik_center = home_musik_center
+        self._home_checker_icon = home_checker_icon
+        self._home_checker_center = home_checker_center
+        self._home_settings_icon = home_settings_icon
+        self._home_settings_center = home_settings_center
         
         # Fonts
         self.font_large = pygame.font.Font(None, 42)
@@ -68,6 +89,9 @@ class Renderer:
         # Menu button rects (updated when menu is drawn)
         self.menu_button_rects: Dict[str, pygame.Rect] = {}
         self.menu_content_overflow: int = 0
+        self.home_musik_rect: Optional[pygame.Rect] = None
+        self.home_checker_rect: Optional[pygame.Rect] = None
+        self.home_settings_rect: Optional[pygame.Rect] = None
         # Header fade: spans from content_top (transparent) to screen edge (opaque)
         # Covers the entire title zone so content slides under it smoothly (iOS-style)
         header_fade_size = SCREEN_WIDTH - 615  # 105px, starts just above first button top
@@ -127,13 +151,27 @@ class Renderer:
             self.add_button_rect = None
             self.delete_button_rect = None
             self.settings_button_rect = None
+            self.home_musik_rect = None
+            self.home_checker_rect = None
+            self.home_settings_rect = None
             self._draw_menu_frame(ctx)
+            return None
+
+        # Home screen — full scene, no carousel
+        if ctx.app_screen == AppScreen.HOME:
+            self.add_button_rect = None
+            self.delete_button_rect = None
+            self.settings_button_rect = None
+            self._draw_home_screen(ctx)
             return None
 
         # Clear button hit rects
         self.add_button_rect = None
         self.delete_button_rect = None
         self.settings_button_rect = None
+        self.home_musik_rect = None
+        self.home_checker_rect = None
+        self.home_settings_rect = None
         
         current_item = ctx.items[ctx.selected_index] if ctx.selected_index < len(ctx.items) else None
         current_track_key = self._get_track_key(
@@ -189,7 +227,14 @@ class Renderer:
                 self._static_layer = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
             self._static_layer.blit(self.screen, (0, 0))
             
-            self._draw_carousel(ctx.items, effective_scroll, ctx.now_playing, ctx.delete_mode_id, ctx.is_loading)
+            self._draw_carousel(
+                ctx.items,
+                effective_scroll,
+                ctx.now_playing,
+                ctx.delete_mode_id,
+                ctx.is_loading,
+                ctx.app_screen,
+            )
             if ctx.toast_message:
                 self._draw_toast(ctx.toast_message)
             self._last_toast = ctx.toast_message
@@ -202,7 +247,14 @@ class Renderer:
             self.screen.blit(self._static_layer, 
                            self._carousel_rect.topleft, 
                            self._carousel_rect)
-            self._draw_carousel(ctx.items, effective_scroll, ctx.now_playing, ctx.delete_mode_id, ctx.is_loading)
+            self._draw_carousel(
+                ctx.items,
+                effective_scroll,
+                ctx.now_playing,
+                ctx.delete_mode_id,
+                ctx.is_loading,
+                ctx.app_screen,
+            )
             if ctx.toast_message:
                 self._draw_toast(ctx.toast_message)
             self._last_toast = ctx.toast_message
@@ -213,7 +265,14 @@ class Renderer:
                 self.screen.blit(self._static_layer,
                                self._carousel_rect.topleft,
                                self._carousel_rect)
-                self._draw_carousel(ctx.items, effective_scroll, ctx.now_playing, ctx.delete_mode_id, ctx.is_loading)
+                self._draw_carousel(
+                    ctx.items,
+                    effective_scroll,
+                    ctx.now_playing,
+                    ctx.delete_mode_id,
+                    ctx.is_loading,
+                    ctx.app_screen,
+                )
                 return [self._carousel_rect]
             return []
     
@@ -280,15 +339,18 @@ class Renderer:
             self.screen.blit(btn_text, btn_text_rect)
             self.settings_button_rect = (btn_bg.x, btn_bg.y, btn_bg.width, btn_bg.height)
         else:
-            # Normal empty state: Spotify instructions
             self.settings_button_rect = None
-            line1 = self._render_text_rotated('Play to Mello via Spotify', self.font_medium, COLORS['text_secondary'])
+            if ctx.app_screen == AppScreen.CHECKPOD:
+                line1 = self._render_text_rotated('Lädt CheckPod…', self.font_medium, COLORS['text_secondary'])
+            else:
+                line1 = self._render_text_rotated('Play to Mello via Spotify', self.font_medium, COLORS['text_secondary'])
             line1_rect = line1.get_rect(center=(center_x - 30, center_y))
             self.screen.blit(line1, line1_rect)
 
-            line2 = self._render_text_rotated('Tap + to save', self.font_medium, COLORS['text_secondary'])
-            line2_rect = line2.get_rect(center=(center_x - 60, center_y))
-            self.screen.blit(line2, line2_rect)
+            if ctx.app_screen != AppScreen.CHECKPOD:
+                line2 = self._render_text_rotated('Tap + to save', self.font_medium, COLORS['text_secondary'])
+                line2_rect = line2.get_rect(center=(center_x - 60, center_y))
+                self.screen.blit(line2, line2_rect)
     
     def _draw_track_info(self, item: Optional[CatalogItem], ctx: RenderContext):
         """Draw track name and artist (portrait mode - at user's top)."""
@@ -346,8 +408,9 @@ class Renderer:
         if self._text_cache.get('artist_surface'):
             self.screen.blit(self._text_cache['artist_surface'], self._text_cache['artist_rect'])
     
-    def _draw_carousel(self, items: List[CatalogItem], scroll_x: float, 
-                       now_playing: NowPlaying, delete_mode_id: Optional[str], loading: bool = False):
+    def _draw_carousel(self, items: List[CatalogItem], scroll_x: float,
+                       now_playing: NowPlaying, delete_mode_id: Optional[str],
+                       loading: bool = False, app_screen: AppScreen = AppScreen.SPOTIFY):
         """Draw album cover carousel (portrait mode - covers along Y axis)."""
         # Portrait mode: covers laid out along Y axis (user's horizontal)
         center_y = CAROUSEL_CENTER_Y  # 640
@@ -399,9 +462,9 @@ class Renderer:
             if loading:
                 self._draw_loading_spinner(center_cover_rect)
             
-            if center_item.is_temp:
+            if center_item.is_temp and app_screen == AppScreen.SPOTIFY:
                 self._draw_add_button(center_cover_rect)
-            elif delete_mode_id == center_item.id:
+            elif delete_mode_id == center_item.id and app_screen == AppScreen.SPOTIFY:
                 self._draw_delete_button(center_cover_rect)
     
     def _draw_cover_progress(self, cover_rect: tuple, item: CatalogItem, now_playing: NowPlaying):
@@ -465,7 +528,13 @@ class Renderer:
         gray_color = COLORS['bg_elevated']
         play_color = COLORS['accent']
 
-        # Headphone button — only when BT is connected, opposite corner from volume
+        # Home button — always available from Spotify and CheckPod screens.
+        home_center = (x, _HOME_BTN_Y)
+        home_color = self._lighten_color(gray_color) if pressed_button == 'home' else gray_color
+        draw_aa_circle(self.screen, home_color, home_center, BTN_SIZE // 2)
+        self._draw_icon('home', home_center)
+
+        # Headphone button — only when BT is connected, slightly above home.
         if bt_connected:
             hp_center = (x, _HEADPHONE_BTN_Y)
             hp_color = COLORS['accent'] if bt_audio_active else gray_color
@@ -636,6 +705,74 @@ class Renderer:
         self.screen.blit(rotated, rect)
     
     # ============================================
+    # HOME SCREEN
+    # ============================================
+
+    def _draw_home_screen(self, ctx: 'RenderContext'):
+        """Draw the home launcher with background and tappable app icons."""
+        self._needs_full_redraw = True
+        self.home_musik_rect = None
+        self.home_checker_rect = None
+        self.home_settings_rect = None
+
+        if self._home_background is not None:
+            bg_rect = self._home_background.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+            self.screen.blit(self._home_background, bg_rect)
+        else:
+            self.screen.fill(COLORS['bg_primary'])
+
+        self._draw_home_icon(
+            self._home_musik_icon,
+            self._home_musik_center,
+            'home_musik',
+            ctx.pressed_button,
+            'home_musik_rect',
+        )
+        self._draw_home_icon(
+            self._home_checker_icon,
+            self._home_checker_center,
+            'home_checker',
+            ctx.pressed_button,
+            'home_checker_rect',
+        )
+        self._draw_home_icon(
+            self._home_settings_icon,
+            self._home_settings_center,
+            'home_settings',
+            ctx.pressed_button,
+            'home_settings_rect',
+        )
+
+        if ctx.toast_message:
+            self._draw_toast(ctx.toast_message)
+            self._last_toast = ctx.toast_message
+
+    def _draw_home_icon(
+        self,
+        icon: Optional[pygame.Surface],
+        center: Optional[Tuple[int, int]],
+        pressed_key: str,
+        pressed_button: Optional[str],
+        rect_attr: str,
+    ):
+        if icon is None or center is None:
+            return
+
+        draw_icon = icon
+        if pressed_button == pressed_key:
+            pressed_size = max(1, int(icon.get_width() * 0.92))
+            draw_icon = pygame.transform.smoothscale(icon, (pressed_size, pressed_size))
+
+        icon_rect = draw_icon.get_rect(center=center)
+        self.screen.blit(draw_icon, icon_rect)
+
+        pad = HOME_ICON_HIT_PADDING
+        hit_size = HOME_ICON_SIZE + pad * 2
+        hit_rect = pygame.Rect(0, 0, hit_size, hit_size)
+        hit_rect.center = center
+        setattr(self, rect_attr, hit_rect)
+    
+    # ============================================
     # SETUP MENU
     # ============================================
 
@@ -651,6 +788,14 @@ class Renderer:
     _MENU_CONTENT_BOT = 20      # content extends to near screen edge
     _MENU_NAV_SIZE = 60          # close/back icon button diameter
     _MENU_NAV_CENTER = (670, 50)   # close/back icon button center (user's top-left)
+    _PIN_KEYPAD_KEYS = [
+        ['1', '2', '3'],
+        ['4', '5', '6'],
+        ['7', '8', '9'],
+        ['back', '0', 'ok'],
+    ]
+    _PIN_KEYPAD_BTN = 72
+    _PIN_KEYPAD_GAP = 12
 
     _VOL_LABELS = [
         ('speaker', ['Speaker low', 'Speaker mid', 'Speaker high']),
@@ -663,7 +808,13 @@ class Renderer:
         self.menu_button_rects = {}
 
         # Determine title and content items per screen
-        if ctx.menu_state == MenuState.MAIN:
+        if ctx.menu_state == MenuState.PIN_ENTRY:
+            self._draw_pin_screen(ctx, title='Enter code', subtitle='')
+        elif ctx.menu_state == MenuState.CHANGE_PIN:
+            subtitles = ['Current PIN', 'New PIN', 'Confirm PIN']
+            step = min(ctx.change_pin_step, len(subtitles) - 1)
+            self._draw_pin_screen(ctx, title='Change PIN', subtitle=subtitles[step])
+        elif ctx.menu_state == MenuState.MAIN:
             title = 'Settings'
             nav_icon = 'close'
             items = self._build_main_content(ctx)
@@ -691,6 +842,9 @@ class Renderer:
             nav_icon = 'back'
             items = self._build_volume_content(ctx)
         else:
+            return
+
+        if ctx.menu_state in (MenuState.PIN_ENTRY, MenuState.CHANGE_PIN):
             return
 
         H = self._MENU_BTN_H
@@ -725,6 +879,8 @@ class Renderer:
 
     def _build_main_content(self, ctx: 'RenderContext') -> list:
         items = [
+            ('button', 'home', 'Home', COLORS['bg_elevated']),
+            ('separator',),
             ('button', 'wifi', 'WiFi', COLORS['bg_elevated']),
             ('button', 'bluetooth', 'Bluetooth', COLORS['bg_elevated']),
             ('button', 'volume', 'Volume levels', COLORS['bg_elevated']),
@@ -744,11 +900,78 @@ class Renderer:
             items.append(('button', 'check_update', 'Check for updates', COLORS['bg_elevated']))
         items += [
             ('separator',),
-            ('button', 'reset', 'Confirm Reset?' if ctx.reset_confirm_pending else 'Reset', COLORS['error']),
+            ('button', 'change_pin', 'Change PIN', COLORS['bg_elevated']),
+            ('button', 'shutdown', 'Confirm Shutdown?' if ctx.shutdown_confirm_pending else 'Shutdown', COLORS['error']),
+            ('button', 'reset', 'Confirm Factory Reset?' if ctx.reset_confirm_pending else 'Factory Reset', COLORS['error']),
         ]
         if ctx.app_version_label:
             items.append(('footer', f'Version: {ctx.app_version_label}'))
         return items
+
+    def _draw_pin_screen(self, ctx: 'RenderContext', title: str, subtitle: str):
+        """Draw PIN entry keypad (PIN_ENTRY or CHANGE_PIN)."""
+        nav_center = self._MENU_NAV_CENTER
+        nav_r = self._MENU_NAV_SIZE // 2
+        nav_color = COLORS['bg_elevated']
+        if ctx.pressed_button == 'menu_close':
+            nav_color = self._lighten_color(nav_color)
+        draw_aa_circle(self.screen, nav_color, nav_center, nav_r)
+        nav_icon_img = self.icons.get('close')
+        if nav_icon_img:
+            icon_sz = 32
+            scaled = pygame.transform.smoothscale(nav_icon_img, (icon_sz, icon_sz))
+            self.screen.blit(scaled, scaled.get_rect(center=nav_center))
+        self.menu_button_rects['close'] = pygame.Rect(
+            nav_center[0] - nav_r, nav_center[1] - nav_r,
+            self._MENU_NAV_SIZE, self._MENU_NAV_SIZE,
+        )
+
+        title_surf = self._render_text_rotated(title, self.font_large, COLORS['text_primary'])
+        self.screen.blit(title_surf, title_surf.get_rect(center=(self._MENU_TITLE_X, CAROUSEL_CENTER_Y)))
+
+        if subtitle:
+            sub_surf = self._render_text_rotated(subtitle, self.font_small, COLORS['text_muted'])
+            self.screen.blit(sub_surf, sub_surf.get_rect(center=(560, CAROUSEL_CENTER_Y)))
+
+        # PIN dots
+        filled = len(ctx.pin_buffer)
+        dot_gap = 28
+        dots_total_w = (PIN_LENGTH - 1) * dot_gap
+        dot_start_y = CAROUSEL_CENTER_Y - dots_total_w // 2
+        dot_x = 470
+        for i in range(PIN_LENGTH):
+            dot_y = dot_start_y + i * dot_gap
+            color = COLORS['text_primary'] if i < filled else COLORS['text_muted']
+            draw_aa_circle(self.screen, color, (dot_x, dot_y), 8)
+
+        # Keypad grid
+        btn = self._PIN_KEYPAD_BTN
+        gap = self._PIN_KEYPAD_GAP
+        grid_w = btn * 3 + gap * 2
+        grid_h = btn * 4 + gap * 3
+        grid_center_x = 300
+        grid_center_y = CAROUSEL_CENTER_Y
+        grid_origin_x = grid_center_x + grid_h // 2
+        grid_origin_y = grid_center_y - grid_w // 2
+
+        labels = {'back': '⌫', 'ok': 'OK'}
+        for row_idx, row in enumerate(self._PIN_KEYPAD_KEYS):
+            for col_idx, key in enumerate(row):
+                rect = pygame.Rect(
+                    grid_origin_x - row_idx * (btn + gap) - btn,
+                    grid_origin_y + col_idx * (btn + gap),
+                    btn,
+                    btn,
+                )
+                label = labels.get(key, key)
+                bg = COLORS['bg_elevated']
+                pin_key = f'pin_{key}'
+                if ctx.pressed_button == pin_key:
+                    bg = self._lighten_color(bg)
+                self._draw_menu_button(rect, label, bg)
+                self.menu_button_rects[pin_key] = rect
+
+        self._needs_full_redraw = True
 
     def _build_wifi_content(self, ctx: 'RenderContext') -> list:
         items = []

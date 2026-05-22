@@ -41,7 +41,21 @@ sudo apt-get install -y \
   python3-venv python3-pip python3-dev python3-pygame \
   libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
   network-manager \
-  pipewire pipewire-pulse wireplumber pipewire-alsa libspa-0.2-bluetooth
+  pipewire pipewire-pulse wireplumber pipewire-alsa libspa-0.2-bluetooth \
+  mpv
+
+# Keep the Pi reachable for SSH/Spotify while the display is asleep.
+sudo mkdir -p /etc/NetworkManager/conf.d
+cat << 'EOF' | sudo tee /etc/NetworkManager/conf.d/99-mello-wifi-powersave.conf > /dev/null
+[connection]
+wifi.powersave = 2
+EOF
+sudo iw dev wlan0 set power_save off 2>/dev/null || true
+while IFS=: read -r con_name con_type _; do
+  if [ "$con_type" = "802-11-wireless" ]; then
+    sudo nmcli con modify "$con_name" 802-11-wireless.band bg 2>/dev/null || true
+  fi
+done < <(nmcli -t -f NAME,TYPE con show 2>/dev/null || true)
 
 # ============================================
 # 2. Configure boot settings (display + audio + quiet boot)
@@ -340,7 +354,7 @@ sudo systemctl stop getty@tty1.service 2>/dev/null || true
 # without a password prompt (needed for the setup menu)
 TMP_SUDOERS="/tmp/mello-wifi.$$"
 cat > "$TMP_SUDOERS" << EOF
-$MELLO_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /bin/systemctl stop mello-librespot, /bin/systemctl start mello-librespot, /bin/systemctl restart mello-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth
+$MELLO_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /usr/sbin/iw, /bin/systemctl stop mello-librespot, /bin/systemctl start mello-librespot, /bin/systemctl restart mello-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth, /usr/bin/systemctl poweroff
 EOF
 sudo visudo -cf "$TMP_SUDOERS"
 sudo install -m 440 "$TMP_SUDOERS" /etc/sudoers.d/mello-wifi

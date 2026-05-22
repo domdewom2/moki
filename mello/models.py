@@ -10,11 +10,20 @@ from typing import Optional, List, Literal
 class MenuState(Enum):
     """Setup menu states (replaces 3 separate booleans)."""
     CLOSED = auto()
+    PIN_ENTRY = auto()
+    CHANGE_PIN = auto()
     MAIN = auto()
     WIFI_LIST = auto()
     WIFI_AP = auto()
     BT_LIST = auto()
     VOLUME_LEVELS = auto()
+
+
+class AppScreen(Enum):
+    """Top-level app views."""
+    SPOTIFY = auto()
+    HOME = auto()
+    CHECKPOD = auto()
 
 
 @dataclass

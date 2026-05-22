@@ -9,6 +9,9 @@ from .setup_menu import SetupMenu
 from .settings import Settings
 from .analytics import UsageTracker
 from .bluetooth import BluetoothManager, BluetoothDevice
+from .checkpod_manager import CheckPodManager
 
-__all__ = ['SleepManager', 'SmoothCarousel', 'PlayTimer', 'PerformanceMonitor', 'AutoPauseManager', 'SetupMenu', 'Settings', 'UsageTracker', 'BluetoothManager', 'BluetoothDevice']
+from .checkpod_manager import CheckPodManager
+
+__all__ = ['SleepManager', 'SmoothCarousel', 'PlayTimer', 'PerformanceMonitor', 'AutoPauseManager', 'SetupMenu', 'Settings', 'UsageTracker', 'BluetoothManager', 'BluetoothDevice', 'CheckPodManager']
 

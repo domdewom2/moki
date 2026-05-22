@@ -16,7 +16,7 @@ from typing import Optional, List, Dict
 
 import pygame
 
-from ..config import COLORS, COVER_SIZE, COVER_SIZE_SMALL, IMAGE_CACHE_MAX_SIZE
+from ..config import COLORS, COVER_SIZE, COVER_SIZE_SMALL, IMAGE_CACHE_MAX_SIZE, CHECKPOD_IMAGES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,19 @@ class ImageCache:
     
     def _get_variant_path(self, image_path: str, size: int, dimmed: bool = False) -> Path:
         """Get the path to the correct pre-scaled image variant."""
+        if image_path.startswith('/checkpod/images/'):
+            filename = image_path.replace('/checkpod/images/', '')
+            base = filename.replace('.png', '').replace('.jpg', '')
+            if size == COVER_SIZE_SMALL:
+                suffix = '_small_dim' if dimmed else '_small'
+            else:
+                suffix = '_dim' if dimmed else ''
+            variant_path = CHECKPOD_IMAGES_DIR / f'{base}{suffix}.png'
+            if variant_path.exists():
+                return variant_path
+            logger.warning(f'CheckPod image not found: {base}{suffix}.png')
+            return None
+
         if not image_path.startswith('/images/'):
             return None
         

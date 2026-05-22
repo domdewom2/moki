@@ -7,6 +7,7 @@ import signal
 import logging
 import subprocess
 import threading
+from pathlib import Path
 from typing import Optional, List
 
 import pygame
@@ -14,21 +15,27 @@ import pygame
 from .config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
     LIBRESPOT_URL, LIBRESPOT_WS,
-    CATALOG_PATH, PROGRESS_PATH, IMAGES_DIR, ICONS_DIR,
+    CATALOG_PATH, PROGRESS_PATH, IMAGES_DIR, ICONS_DIR, ASSETS_DIR,
     MOCK_MODE,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
     CAROUSEL_X, CAROUSEL_CENTER_Y, CONTROLS_X, BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING,
     CAROUSEL_TOUCH_MARGIN, MAX_SWIPE_JUMP, VELOCITY_THRESHOLDS,
     ACTION_DEBOUNCE, BUTTON_PRESS_DURATION, MENU_HOLD_TIME,
     CONTEXT_SWITCH_WATCHDOG_TIMEOUT,
+    PROGRESS_SAVE_INTERVAL,
     POSTHOG_API_KEY, POSTHOG_HOST, ANALYTICS_DISTINCT_ID,
     ANALYTICS_INCLUDE_CONTENT, ANALYTICS_USE_MACHINE_ID,
+    HOME_ICON_SIZE, HOME_ICON_SCREEN_X_FRAC, HOME_ICON_SCREEN_Y_FRAC,
+    HOME_CHECKER_ICON_SCREEN_Y_FRAC, HOME_SETTINGS_ICON_SCREEN_Y_FRAC, MPV_SOCKET_PATH,
 )
-from .models import CatalogItem, NowPlaying, LibrespotStatus, MenuState
+from .models import CatalogItem, NowPlaying, LibrespotStatus, MenuState, AppScreen
 from .api import LibrespotAPI, NullLibrespotAPI, CatalogManager
 from .handlers import TouchHandler, EventListener, EvdevTouchHandler
-from .managers import SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager, SetupMenu, Settings, UsageTracker, BluetoothManager
-from .controllers import VolumeController, PlaybackController, is_repeatable_spotify_context
+from .managers import (
+    SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager,
+    SetupMenu, Settings, UsageTracker, BluetoothManager, CheckPodManager,
+)
+from .controllers import VolumeController, PlaybackController, is_repeatable_spotify_context, LocalPlaybackController
 from .ui import ImageCache, Renderer, RenderContext
 from .utils import run_async, get_runtime_version_label, set_system_volume
 
@@ -215,7 +222,18 @@ class Mello:
         # UI Components
         self.image_cache = ImageCache(IMAGES_DIR)
         self.icons = self._load_icons()
-        self.renderer = Renderer(self.screen, self.image_cache, self.icons)
+        home_bg, home_musik_icon, home_musik_center, home_checker_icon, home_checker_center, home_settings_icon, home_settings_center = self._load_home_assets()
+        self.renderer = Renderer(
+            self.screen, self.image_cache, self.icons,
+            home_background=home_bg,
+            home_musik_icon=home_musik_icon,
+            home_musik_center=home_musik_center,
+            home_checker_icon=home_checker_icon,
+            home_checker_center=home_checker_center,
+            home_settings_icon=home_settings_icon,
+            home_settings_center=home_settings_center,
+        )
+        self.app_screen = AppScreen.HOME
         
         # Handlers
         self.touch = TouchHandler()
@@ -264,6 +282,21 @@ class Mello:
             is_request_current=self._is_play_request_current,
             on_play_committed=self._on_play_committed,
             on_play_failed=self._on_play_failed,
+        )
+
+        self.checkpod_manager = CheckPodManager(
+            on_toast=self._show_toast,
+            on_invalidate=lambda: (
+                self._update_carousel_max_index(),
+                self.renderer.invalidate(),
+            ),
+            get_progress_expiry=lambda: self.settings.progress_expiry_hours,
+        )
+        self.local_playback = LocalPlaybackController(
+            mock_mode=self.mock_mode,
+            on_state_changed=self._on_local_playback_changed,
+            on_stopped=self._on_local_playback_stopped,
+            on_error=self._show_toast,
         )
         
         # State (with thread-safe now_playing and connected)
@@ -320,10 +353,22 @@ class Mello:
         # positive play intent (play tap or context switch).
         self._manual_pause_lock: bool = False
         self._manual_pause_context_uri: Optional[str] = None
+        # Block focus auto-play after opening Spotify from home until explicit play.
+        self._spotify_launch_lock: bool = False
+        # Block focus auto-play after opening CheckPod from home until explicit play.
+        self._checkpod_launch_lock: bool = False
+        self._checkpod_play_in_progress: bool = False
+        self._checkpod_pending_focus_uri: Optional[str] = None
+        self._checkpod_pending_focus_since: float = 0.0
+        self._last_checkpod_progress_save: float = 0.0
+        self._checkpod_play_failed_uri: Optional[str] = None
+        self._checkpod_play_failed_at: float = 0.0
+        self._checkpod_play_target_uri: Optional[str] = None
         self._autoplay_stall_since: float = 0.0
         self._last_autoplay_stall_log: float = 0.0
         self._context_switch_stall_since: float = 0.0
         self._last_context_watchdog_log: float = 0.0
+        self._last_loader_mismatch_log: float = 0.0
         
         # Interaction tracking
         self.user_interacting = False
@@ -347,6 +392,7 @@ class Mello:
         # Cached network status (avoid shelling out to nmcli every frame)
         self._cached_has_network: bool = True
         self._network_check_time: float = 0.0
+        self._last_sleep_network_reconnect_at: float = 0.0
         
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -374,6 +420,8 @@ class Mello:
             on_library_cleared=self._on_library_cleared,
             bluetooth_manager=self.bluetooth,
             on_volume_preview=self._preview_volume,
+            on_open_home=self._open_home_screen,
+            on_prepare_shutdown=self._prepare_shutdown,
         )
         # Volume button hold tracking (3s hold opens setup menu)
         self._volume_hold_start: Optional[float] = None
@@ -401,14 +449,213 @@ class Mello:
             'headphone': 'headphone.png',
             'close': 'close.png',
             'back': 'back.png',
+            'home': 'home.png',
             'logo': 'mello-logo.png',
         }
         for name, filename in icon_files.items():
             try:
-                icons[name] = pygame.image.load(ICONS_DIR / filename).convert_alpha()
+                icon = pygame.image.load(ICONS_DIR / filename).convert_alpha()
+                if name == 'home':
+                    icon = pygame.transform.rotate(icon, -90)
+                icons[name] = icon
             except Exception as e:
                 logger.warning(f'Failed to load icon {filename}: {e}', exc_info=True)
         return icons
+
+    def _load_home_icon(self, icon_path: Path, center: tuple[int, int]) -> Optional[pygame.Surface]:
+        icon = pygame.image.load(icon_path).convert_alpha()
+        icon_scaled = pygame.transform.smoothscale(icon, (HOME_ICON_SIZE, HOME_ICON_SIZE))
+        return pygame.transform.rotate(icon_scaled, -90)
+
+    def _load_home_assets(self):
+        """Load and prepare home screen background + launcher icons."""
+        bg_path = ASSETS_DIR / 'mello-background.png'
+        musik_path = ASSETS_DIR / 'musik.png'
+        checker_path = ASSETS_DIR / 'Checkpod.png'
+        settings_path = ASSETS_DIR / 'settings.png'
+        try:
+            bg = pygame.image.load(bg_path).convert()
+            bg_rot = pygame.transform.rotate(bg, -90)
+            rot_w, rot_h = bg_rot.get_size()
+            scale = min(SCREEN_WIDTH / rot_w, SCREEN_HEIGHT / rot_h)
+            bg_scaled = pygame.transform.smoothscale(
+                bg_rot,
+                (max(1, int(rot_w * scale)), max(1, int(rot_h * scale))),
+            )
+
+            icon_x = int(SCREEN_WIDTH * HOME_ICON_SCREEN_X_FRAC)
+            musik_center = (icon_x, int(SCREEN_HEIGHT * HOME_ICON_SCREEN_Y_FRAC))
+            checker_center = (icon_x, int(SCREEN_HEIGHT * HOME_CHECKER_ICON_SCREEN_Y_FRAC))
+            settings_center = (icon_x, int(SCREEN_HEIGHT * HOME_SETTINGS_ICON_SCREEN_Y_FRAC))
+
+            musik_icon = self._load_home_icon(musik_path, musik_center)
+            checker_icon = None
+            if checker_path.exists():
+                checker_icon = self._load_home_icon(checker_path, checker_center)
+            else:
+                logger.warning(f'Checker Tobi icon missing: {checker_path}')
+
+            settings_icon = None
+            if settings_path.exists():
+                settings_icon = self._load_home_icon(settings_path, settings_center)
+            else:
+                logger.warning(f'Settings icon missing: {settings_path}')
+
+            logger.info(
+                f'Home assets loaded | musik={musik_center} | checker={checker_center} | settings={settings_center}'
+            )
+            return bg_scaled, musik_icon, musik_center, checker_icon, checker_center, settings_icon, settings_center
+        except Exception as e:
+            logger.warning(f'Failed to load home assets: {e}', exc_info=True)
+            return None, None, None, None, None, None, None
+
+    def _display_items(self) -> List[CatalogItem]:
+        if self.app_screen == AppScreen.CHECKPOD:
+            return self.checkpod_manager.get_display_items()
+        return self.display_items
+
+    def _pause_active_playback(self, reason: str):
+        """Stop whatever is currently playing (Spotify or CheckPod)."""
+        if self.local_playback.is_active:
+            self.local_playback.stop()
+        if (self.now_playing.playing or self.playback.play_state.should_show_loading
+                or self.playback._play_in_progress):
+            self.playback._execute_pause(reason)
+
+    def _open_home_screen(self):
+        """Switch to home screen and stop playback immediately."""
+        self._pause_active_playback('home_open')
+        if self.app_screen != AppScreen.HOME:
+            self._set_manual_pause_lock('home_open')
+        self.app_screen = AppScreen.HOME
+        self._checkpod_launch_lock = False
+        self._checkpod_play_in_progress = False
+        self._checkpod_play_target_uri = None
+        self._checkpod_pending_focus_uri = None
+        self._checkpod_pending_focus_since = 0.0
+        self._pressed_button = None
+        self.renderer.invalidate()
+        logger.info('Home screen opened')
+
+    def _open_spotify_screen(self):
+        """Return to the Spotify player carousel without auto-starting playback."""
+        self.local_playback.stop()
+        self.app_screen = AppScreen.SPOTIFY
+        self._spotify_launch_lock = True
+        self._checkpod_launch_lock = False
+        self._reset_pending_focus('spotify_open')
+        self._update_carousel_max_index()
+        self._pressed_button = None
+        self.renderer.invalidate()
+        logger.info('Spotify screen opened (launch lock active)')
+
+    def _open_checkpod_screen(self):
+        """Open CheckPod episode carousel without auto-starting playback."""
+        self._pause_active_playback('checkpod_open')
+        self._set_manual_pause_lock('checkpod_open')
+        self.app_screen = AppScreen.CHECKPOD
+        self._checkpod_launch_lock = True
+        self._spotify_launch_lock = False
+        self._checkpod_play_in_progress = False
+        self._checkpod_play_target_uri = None
+        self._checkpod_pending_focus_uri = None
+        self._checkpod_pending_focus_since = 0.0
+        self.selected_index = 0
+        self.carousel.scroll_x = 0.0
+        self.carousel.set_target(0)
+        self._update_carousel_max_index()
+        self._pressed_button = None
+        self.renderer.invalidate()
+        run_async(self.checkpod_manager.refresh_episodes)
+        self.local_playback.warm_up()
+        logger.info('CheckPod screen opened (launch lock active)')
+
+    def _on_local_playback_changed(self):
+        playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
+        if self.app_screen != AppScreen.CHECKPOD:
+            return
+        self.now_playing = NowPlaying(
+            playing=playing,
+            paused=paused,
+            stopped=not playing and not paused,
+            context_uri=context_uri,
+            track_uri=context_uri,
+            track_name=track_name,
+            track_artist='Checker Tobi',
+            position=position_ms,
+            duration=duration_ms,
+        )
+        self.renderer.invalidate()
+
+    def _on_local_playback_stopped(self, context_uri: str, position_ms: int, duration_ms: int, name: str):
+        self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, name)
+
+    def _clear_checkpod_launch_lock(self, reason: str):
+        if self._checkpod_launch_lock:
+            logger.info(f'CheckPod launch lock cleared ({reason})')
+        self._checkpod_launch_lock = False
+
+    def _play_checkpod_item(self, item: CatalogItem, from_beginning: bool = False):
+        episode_id = self.checkpod_manager.get_episode_id_for_uri(item.uri)
+        if not episode_id:
+            self._show_toast('Folge nicht gefunden')
+            return
+
+        if self._checkpod_play_in_progress and self._checkpod_play_target_uri == item.uri:
+            return
+        if not from_beginning and self._is_checkpod_item_playing(item):
+            return
+
+        self._checkpod_play_target_uri = item.uri
+
+        def _do_play():
+            self._checkpod_play_in_progress = True
+            self.renderer.invalidate()
+            audio_url = self.checkpod_manager.get_audio_url(episode_id)
+            path = self.checkpod_manager.ensure_cached(episode_id, audio_url)
+            if not path:
+                self._checkpod_play_in_progress = False
+                self.renderer.invalidate()
+                return
+
+            progress = None if from_beginning else self.checkpod_manager.get_progress(item.uri)
+            start_ms = 0
+            duration_ms = 0
+            if progress:
+                start_ms = int(progress.get('position') or 0)
+                duration_ms = int(progress.get('duration') or 0)
+
+            ok = self.local_playback.play(
+                path,
+                context_uri=item.uri,
+                track_name=item.name,
+                start_position_ms=start_ms,
+                duration_ms=duration_ms,
+            )
+            self._checkpod_play_in_progress = False
+            if self._checkpod_play_target_uri == item.uri:
+                self._checkpod_play_target_uri = None
+            if ok:
+                self.volume.unmute()
+                self._checkpod_play_failed_uri = None
+                self._checkpod_play_failed_at = 0.0
+                self._clear_checkpod_launch_lock('play_started')
+            else:
+                self._checkpod_play_failed_uri = item.uri
+                self._checkpod_play_failed_at = time.time()
+            self.renderer.invalidate()
+
+        run_async(_do_play)
+
+    def _prepare_shutdown(self):
+        """Save playback progress and flush analytics before poweroff."""
+        logger.info('Preparing for shutdown')
+        if self.local_playback.is_active:
+            self.local_playback.stop()
+        if self.now_playing.playing or self.playback.play_state.should_show_loading:
+            self.playback._execute_pause('shutdown')
+        self._save_progress_on_shutdown()
+        self.tracker.on_shutdown()
     
     def _show_toast(self, message: str):
         """Show a brief toast message on screen."""
@@ -426,7 +673,7 @@ class Mello:
 
     def _current_focused_uri(self) -> Optional[str]:
         """Return currently focused URI, or None."""
-        items = self.display_items
+        items = self._display_items()
         if not items or self.selected_index >= len(items):
             return None
         return items[self.selected_index].uri
@@ -504,6 +751,12 @@ class Mello:
             )
         self._manual_pause_lock = False
         self._manual_pause_context_uri = None
+
+    def _clear_spotify_launch_lock(self, reason: str):
+        """Allow focus auto-play after user explicitly starts playback in Spotify."""
+        if self._spotify_launch_lock:
+            logger.info(f'Spotify launch lock cleared ({reason})')
+        self._spotify_launch_lock = False
 
     def _display_title_for_item(self, item: Optional[CatalogItem]) -> tuple[str, str]:
         """Return (title_source, title_text) used by renderer track header."""
@@ -810,7 +1063,8 @@ class Mello:
     
     def _update_carousel_max_index(self):
         """Update carousel max index when items change."""
-        self.carousel.max_index = max(0, len(self.display_items) - 1)
+        items = self._display_items()
+        self.carousel.max_index = max(0, len(items) - 1)
     
     def _on_bt_audio_changed(self, active: bool):
         """Called by BluetoothManager when audio routing changes."""
@@ -922,6 +1176,7 @@ class Mello:
         
         self.events.stop()
         self.evdev_touch.stop()
+        self.local_playback.shutdown()
         pygame.quit()
         logger.info('Mello stopped')
     
@@ -935,6 +1190,11 @@ class Mello:
         is_animating = not self.carousel.settled or self.touch.dragging
         if is_animating or self.playback.play_state.is_loading:
             return 60
+        if self.app_screen == AppScreen.CHECKPOD:
+            playing, paused, _, _, _, _ = self.local_playback.get_state()
+            if self._checkpod_play_in_progress or playing or paused or self._active_toast:
+                return 10
+            return 5
         elif self.now_playing.playing or self._active_toast:
             return 10
         return 5
@@ -947,11 +1207,19 @@ class Mello:
         
         self._last_fps_log = now
         avg_fps = self.perf_monitor.current_fps
-        is_loading = self.playback.play_state.is_loading
-        items = self.display_items
+        items = self._display_items()
         focused = items[self.selected_index].name if items and self.selected_index < len(items) else '?'
-        playing_ctx = self.now_playing.context_uri or 'none'
-        playing_name = self.now_playing.track_name or 'none'
+        if self.app_screen == AppScreen.CHECKPOD:
+            playing, paused, _, _, playing_ctx, playing_name = self.local_playback.get_state()
+            is_loading = self._checkpod_play_in_progress
+            playing_ctx = playing_ctx or 'none'
+            playing_name = playing_name or 'none'
+            is_playing = playing or paused
+        else:
+            is_loading = self.playback.play_state.is_loading
+            playing_ctx = self.now_playing.context_uri or 'none'
+            playing_name = self.now_playing.track_name or 'none'
+            is_playing = self.now_playing.playing
         api_metrics = self.api.metrics_snapshot() if hasattr(self.api, 'metrics_snapshot') else {}
         suppressed = api_metrics.get('suppressed', {})
         failures = api_metrics.get('failures', {})
@@ -964,7 +1232,7 @@ class Mello:
         )
 
         focused_uri = items[self.selected_index].uri if items and self.selected_index < len(items) else None
-        if (self.now_playing.playing and focused_uri and playing_ctx
+        if (is_playing and focused_uri and playing_ctx and playing_ctx != 'none'
                 and focused_uri != playing_ctx and not is_loading and not self._user_driving):
             logger.warning(
                 f'MISMATCH | screen="{focused}" | audio="{playing_name}" '
@@ -1005,6 +1273,13 @@ class Mello:
                     if self.connected:
                         logger.error(f'Status poll error: {e}')
                     self.connected = False
+
+            if (
+                self.sleep_manager.is_sleeping
+                and self._connection_fail_count >= 2
+                and (not self.connected or self._status_unknown)
+            ):
+                self._recover_sleep_network('status_unknown')
             
             # Poll faster when disconnected for quicker recovery
             is_fast_polling = not self.connected
@@ -1061,6 +1336,10 @@ class Mello:
         if raw and isinstance(raw, dict):
             self._last_status_ok_at = time.time()
             self._status_unknown = False
+
+            if self.app_screen == AppScreen.CHECKPOD:
+                return
+
             api_context_uri = raw.get('context_uri')
             ws_context_uri = self.events.context_uri
             if api_context_uri and ws_context_uri and api_context_uri != ws_context_uri:
@@ -1310,16 +1589,23 @@ class Mello:
                 if not self.sleep_manager.is_sleeping:
                     if self.setup_menu.is_open and self._menu_touch_start is not None:
                         if not self._menu_touch_scrolled:
-                            # Flash pressed state on close/back button
-                            close_rect = self.renderer.menu_button_rects.get('close')
-                            if close_rect and close_rect.collidepoint(*event.pos):
-                                self._pressed_button = 'menu_close'
-                                self._pressed_time = time.time()
+                            # Flash pressed state on tapped menu button
+                            for key, rect in self.renderer.menu_button_rects.items():
+                                if rect.collidepoint(*event.pos):
+                                    if key == 'close':
+                                        self._pressed_button = 'menu_close'
+                                    elif key.startswith('pin_'):
+                                        self._pressed_button = key
+                                    self._pressed_time = time.time()
+                                    break
                             self.setup_menu.handle_tap(event.pos, self.renderer.menu_button_rects)
                         self._menu_touch_start = None
                         self._menu_touch_scrolled = False
                     else:
-                        self._handle_touch_up(event.pos)
+                        if self.app_screen == AppScreen.HOME and not self.setup_menu.is_open:
+                            self._handle_home_touch_up(event.pos)
+                        else:
+                            self._handle_touch_up(event.pos)
                     self._handle_button_up()
     
     def _handle_key(self, key):
@@ -1345,6 +1631,21 @@ class Mello:
         if self.setup_menu.is_open:
             self._menu_touch_start = pos
             self._menu_touch_scrolled = False
+            return
+
+        if self.app_screen == AppScreen.HOME:
+            if self.renderer.home_musik_rect and self.renderer.home_musik_rect.collidepoint(pos):
+                self._pressed_button = 'home_musik'
+                self._pressed_time = time.time()
+                self.renderer.invalidate()
+            elif self.renderer.home_checker_rect and self.renderer.home_checker_rect.collidepoint(pos):
+                self._pressed_button = 'home_checker'
+                self._pressed_time = time.time()
+                self.renderer.invalidate()
+            elif self.renderer.home_settings_rect and self.renderer.home_settings_rect.collidepoint(pos):
+                self._pressed_button = 'home_settings'
+                self._pressed_time = time.time()
+                self.renderer.invalidate()
             return
         
         x, y = pos
@@ -1374,6 +1675,31 @@ class Mello:
             logger.debug('Touch down: outside carousel')
             self._handle_button_tap(pos)
     
+    def _handle_home_touch_up(self, pos):
+        """Handle tap release on the home screen."""
+        pressed = self._pressed_button
+        self._pressed_button = None
+        self.renderer.invalidate()
+        if pressed == 'home_musik':
+            rect = self.renderer.home_musik_rect
+            if rect and rect.collidepoint(pos):
+                self._open_spotify_screen()
+        elif pressed == 'home_checker':
+            rect = self.renderer.home_checker_rect
+            if rect and rect.collidepoint(pos):
+                self._open_checkpod_screen()
+        elif pressed == 'home_settings':
+            rect = self.renderer.home_settings_rect
+            if rect and rect.collidepoint(pos):
+                self._open_settings_with_pin()
+
+    def _open_settings_with_pin(self):
+        """Open settings menu behind PIN gate."""
+        self._pause_active_playback('settings_open')
+        self.setup_menu.open_with_pin()
+        self.renderer.invalidate()
+        logger.info('Settings PIN entry opened')
+
     def _check_button_click(self, pos) -> bool:
         """Check if click is on add/delete button."""
         x, y = pos
@@ -1393,7 +1719,7 @@ class Mello:
         if self.renderer.settings_button_rect:
             bx, by, bw, bh = self.renderer.settings_button_rect
             if bx <= x <= bx + bw and by <= y <= by + bh:
-                self.setup_menu.open()
+                self._open_settings_with_pin()
                 return True
 
         return False
@@ -1499,7 +1825,8 @@ class Mello:
             target = base_target + velocity_bonus if velocity < 0 else base_target - velocity_bonus
             
             target = max(self.selected_index - MAX_SWIPE_JUMP, min(target, self.selected_index + MAX_SWIPE_JUMP))
-            target = max(0, min(target, len(self.display_items) - 1))
+            active_items = self._display_items()
+            target = max(0, min(target, len(active_items) - 1 if active_items else 0))
             
             self._snap_to(target)
         elif action == 'tap':
@@ -1542,21 +1869,29 @@ class Mello:
         # Volume button Y position (matches renderer)
         vol_y = center_y + (COVER_SIZE + COVER_SPACING) + COVER_SIZE_SMALL // 2 - BTN_SIZE // 2
 
-        # Headphone button Y position (matches renderer constant)
-        hp_y = center_y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
+        # Home button Y position (matches renderer constant)
+        home_y = center_y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
+        hp_y = home_y + BTN_SIZE + 20
 
         # Portrait mode: check if X is in button column
         if CONTROLS_X - PLAY_BTN_SIZE <= x <= CONTROLS_X + PLAY_BTN_SIZE:
             button_pressed = None
 
-            # Headphone: Y = hp_y (~107) — only active when BT device connected
-            if hp_y - BTN_SIZE <= y <= hp_y + BTN_SIZE and self.bluetooth.connected_device:
+            # Home: Y = home_y (~107) — return to launcher from Spotify/CheckPod
+            if home_y - BTN_SIZE // 2 <= y <= home_y + BTN_SIZE // 2:
+                button_pressed = 'home'
+                self._open_home_screen()
+            # Headphone: Y = hp_y (~227) — only active when BT device connected
+            elif hp_y - BTN_SIZE // 2 <= y <= hp_y + BTN_SIZE // 2 and self.bluetooth.connected_device:
                 button_pressed = 'headphone'
                 self.bluetooth.toggle_audio()
             # Prev: Y = center_y - btn_spacing (485)
             elif center_y - btn_spacing - BTN_SIZE <= y <= center_y - btn_spacing + BTN_SIZE:
                 button_pressed = 'prev'
-                self._skip_track(self.api.prev)
+                if self.app_screen == AppScreen.CHECKPOD:
+                    self._navigate(-1)
+                else:
+                    self._skip_track(self.api.prev)
             # Play: Y = center_y (640)
             elif center_y - PLAY_BTN_SIZE <= y <= center_y + PLAY_BTN_SIZE:
                 button_pressed = 'play'
@@ -1564,7 +1899,10 @@ class Mello:
             # Next: Y = center_y + btn_spacing (795)
             elif center_y + btn_spacing - BTN_SIZE <= y <= center_y + btn_spacing + BTN_SIZE:
                 button_pressed = 'next'
-                self._skip_track(self.api.next)
+                if self.app_screen == AppScreen.CHECKPOD:
+                    self._navigate(1)
+                else:
+                    self._skip_track(self.api.next)
             # Volume: Y = vol_y (~1173) — start hold timer; action fires on release
             elif vol_y - BTN_SIZE <= y <= vol_y + BTN_SIZE:
                 button_pressed = 'volume'
@@ -1586,7 +1924,7 @@ class Mello:
         is interrupted: timer cancelled, running play-thread invalidated,
         and instant silence sent to librespot.
         """
-        items = self.display_items
+        items = self._display_items()
         if not items:
             return
 
@@ -1598,25 +1936,32 @@ class Mello:
             self.carousel.set_target(target_index)
             self._bump_focus_epoch(f'snap {old_index}->{target_index}')
             self._reset_pending_focus('snap_focus_changed')
+            self._checkpod_pending_focus_uri = None
+            self._checkpod_pending_focus_since = 0.0
+            self._checkpod_play_failed_uri = None
+            self._checkpod_play_failed_at = 0.0
             self._clear_manual_pause_lock('focus_changed')
 
             self.play_timer.cancel()
-            self.playback.stop_all()
-            self.playback.last_context_uri = None
-            self.volume.mute()
-            now = time.time()
-            should_pause_remote = (
-                now - self._last_snap_pause_at > 0.4 and
-                (self.now_playing.playing or self.playback.has_pending_play)
-            )
-            if should_pause_remote:
-                self._last_snap_pause_at = now
-                run_async(self.api.pause)
+            if self.app_screen == AppScreen.CHECKPOD:
+                self.local_playback.stop()
+            else:
+                self.playback.stop_all()
+                self.playback.last_context_uri = None
+                self.volume.mute()
+                now = time.time()
+                should_pause_remote = (
+                    now - self._last_snap_pause_at > 0.4 and
+                    (self.now_playing.playing or self.playback.has_pending_play)
+                )
+                if should_pause_remote:
+                    self._last_snap_pause_at = now
+                    run_async(self.api.pause)
             self._user_driving = True
             self._user_driving_since = time.time()
 
             item = items[target_index]
-            if not item.is_temp and not self._is_item_playing(item):
+            if self.app_screen != AppScreen.CHECKPOD and not item.is_temp and not self._is_item_playing(item):
                 self.playback.play_state.start_loading()
             logger.info(f'Snap: {old_index} -> {target_index}, item={item.name}, _user_driving=True')
         else:
@@ -1624,7 +1969,7 @@ class Mello:
     
     def _navigate(self, direction: int):
         """Navigate carousel."""
-        items = self.display_items
+        items = self._display_items()
         if not items:
             return
         
@@ -1658,6 +2003,9 @@ class Mello:
     def _toggle_play(self):
         """Toggle play/pause."""
         self._user_activated_playback = True
+        if self.app_screen == AppScreen.CHECKPOD:
+            self._toggle_checkpod_play()
+            return
         if self.mock_mode:
             self._toggle_mock_play()
             return
@@ -1665,6 +2013,7 @@ class Mello:
             self._set_manual_pause_lock('pause_tap')
         else:
             self._clear_manual_pause_lock('play_tap')
+            self._clear_spotify_launch_lock('play_tap')
         items = self.display_items
         if self.now_playing.paused and items and self.selected_index < len(items):
             focused_item = items[self.selected_index]
@@ -1676,6 +2025,30 @@ class Mello:
                 self._play_item(focused_item.uri)
                 return
         self.playback.toggle_play(self.display_items, self.selected_index, self.now_playing)
+
+    def _toggle_checkpod_play(self):
+        """Toggle CheckPod local playback for the focused episode."""
+        items = self._display_items()
+        if not items or self.selected_index >= len(items):
+            return
+        item = items[self.selected_index]
+        playing, paused, _, _, context_uri, _ = self.local_playback.get_state()
+
+        if playing:
+            self.local_playback.pause()
+            self._set_manual_pause_lock('checkpod_pause_tap')
+            return
+
+        if paused and context_uri == item.uri:
+            self._clear_manual_pause_lock('checkpod_play_tap')
+            self._clear_checkpod_launch_lock('play_tap')
+            self.volume.unmute()
+            self.local_playback.resume()
+            return
+
+        self._clear_manual_pause_lock('checkpod_play_tap')
+        from_beginning = bool(context_uri and context_uri != item.uri)
+        self._play_checkpod_item(item, from_beginning=from_beginning)
     
     def _toggle_mock_play(self):
         """Toggle mock playback (no real API calls)."""
@@ -1773,6 +2146,52 @@ class Mello:
             return result.stdout.strip().lower().startswith('connected')
         except Exception:
             return True
+
+    def _active_wifi_connection_name(self) -> Optional[str]:
+        """Return the active WiFi connection profile name, if NetworkManager knows one."""
+        try:
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show', '--active'],
+                capture_output=True, text=True, timeout=3,
+            )
+            for line in result.stdout.splitlines():
+                if ':802-11-wireless' in line:
+                    return line.split(':', 1)[0]
+        except Exception as e:
+            logger.debug(f'Could not read active WiFi connection: {e}')
+        return None
+
+    def _recover_sleep_network(self, reason: str):
+        """Reconnect WiFi when the interface stays associated but traffic is dead during sleep."""
+        now = time.time()
+        if now - self._last_sleep_network_reconnect_at < 60:
+            return
+        self._last_sleep_network_reconnect_at = now
+
+        con_name = self._active_wifi_connection_name()
+        if not con_name:
+            logger.warning(f'Sleep network recovery skipped ({reason}): no active WiFi profile')
+            return
+
+        logger.warning(
+            f'Sleep network recovery ({reason}) | reconnecting WiFi profile "{con_name}" '
+            f'| fail_count={self._connection_fail_count}'
+        )
+
+        def _reconnect():
+            commands = [
+                ['sudo', 'iw', 'dev', 'wlan0', 'set', 'power_save', 'off'],
+                ['sudo', 'nmcli', 'device', 'set', 'wlan0', 'autoconnect', 'yes'],
+                ['sudo', 'nmcli', 'con', 'modify', con_name, '802-11-wireless.band', 'bg'],
+                ['sudo', 'nmcli', 'con', 'up', con_name],
+            ]
+            for cmd in commands:
+                try:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12)
+                except Exception as e:
+                    logger.warning(f'Sleep network recovery command failed: {cmd[1]} ({e})')
+
+        run_async(_reconnect)
 
     def _get_cached_network_status(self) -> bool:
         """Return cached network status, refreshing every 10 seconds."""
@@ -1915,6 +2334,8 @@ class Mello:
     
     def _trigger_delete_mode(self):
         """Trigger delete mode for the currently selected item."""
+        if self.app_screen != AppScreen.SPOTIFY:
+            return
         items = self.display_items
         if not items or self.selected_index >= len(items):
             return
@@ -1930,7 +2351,75 @@ class Mello:
     
     def _save_progress_on_shutdown(self):
         """Save progress synchronously before shutdown."""
+        if self.app_screen == AppScreen.CHECKPOD or self.local_playback.is_active:
+            playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
+            if context_uri and position_ms > 0:
+                self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, track_name)
+            self.local_playback.stop(save_progress=False)
         self.playback.save_progress_on_shutdown(self.now_playing)
+
+    def _is_checkpod_item_playing(self, item: CatalogItem) -> bool:
+        playing, _, _, _, context_uri, _ = self.local_playback.get_state()
+        return bool(item and context_uri == item.uri and playing)
+
+    def _is_checkpod_paused_same_focus(self, item: CatalogItem) -> bool:
+        playing, paused, _, _, context_uri, _ = self.local_playback.get_state()
+        return bool(item and context_uri == item.uri and paused and not playing)
+
+    def _update_checkpod_autoplay(self, focused_item: Optional[CatalogItem]):
+        if focused_item is None:
+            return
+        checkpod_ready = (
+            self._user_activated_playback
+            and not self._manual_pause_lock
+            and not self._checkpod_launch_lock
+            and not self._checkpod_play_in_progress
+            and self.carousel.settled
+            and not self.touch.dragging
+        )
+        if not checkpod_ready:
+            self._checkpod_pending_focus_uri = None
+            self._checkpod_pending_focus_since = 0.0
+            return
+
+        if self._is_checkpod_item_playing(focused_item):
+            self._checkpod_pending_focus_uri = None
+            self._checkpod_pending_focus_since = 0.0
+            return
+
+        if self._is_checkpod_paused_same_focus(focused_item):
+            self._checkpod_pending_focus_uri = None
+            self._checkpod_pending_focus_since = 0.0
+            return
+
+        if (
+            self._checkpod_play_failed_uri == focused_item.uri
+            and time.time() - self._checkpod_play_failed_at < 30.0
+        ):
+            return
+
+        focused_uri = focused_item.uri
+        now = time.time()
+        if self._checkpod_pending_focus_uri != focused_uri:
+            self._checkpod_pending_focus_uri = focused_uri
+            self._checkpod_pending_focus_since = now
+            logger.info(f'CheckPod focus stable timer start: {focused_item.name} (1s)')
+        elif now - self._checkpod_pending_focus_since >= 1.0:
+            logger.info(f'CheckPod focus stable 1s -> play: {focused_item.name}')
+            self._checkpod_pending_focus_uri = None
+            self._checkpod_pending_focus_since = 0.0
+            self._play_checkpod_item(focused_item)
+
+    def _save_checkpod_progress_if_due(self):
+        if self.app_screen != AppScreen.CHECKPOD:
+            return
+        now = time.time()
+        if now - self._last_checkpod_progress_save < PROGRESS_SAVE_INTERVAL:
+            return
+        playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
+        if context_uri and (playing or paused) and position_ms > 0:
+            self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, track_name)
+            self._last_checkpod_progress_save = now
     
     def _collect_cover_async(self, context_uri: str, cover_url: str):
         """Collect playlist cover in background thread."""
@@ -1946,12 +2435,14 @@ class Mello:
             logger.debug(f'Cover collection failed: {e}')
     
     def _sync_to_playing(self):
-        """Sync carousel to currently playing item.
+        """Sync carousel focus to currently playing Spotify context.
 
         While _user_driving is True (user recently swiped/played), only accept
         confirmation of our own play request. While False, accept anything
         (external Spotify control, autoplay).
         """
+        if self.app_screen != AppScreen.SPOTIFY:
+            return
         items = self.display_items
         if not items:
             return
@@ -2015,7 +2506,7 @@ class Mello:
     def _update(self, dt: float):
         """Update application state."""
         self._check_touch_health()
-        items = self.display_items
+        items = self._display_items()
         if items:
             self.selected_index = max(0, min(self.selected_index, len(items) - 1))
         
@@ -2054,12 +2545,14 @@ class Mello:
                 self._requested_focus_uri = None
                 self._requested_focus_since = 0.0
         stable_ready = (
-            self._startup_ready
+            self.app_screen == AppScreen.SPOTIFY
+            and self._startup_ready
             and self.connected
             and (status_ready or paused_focused_context)
             and not prioritize_remote_focus
             and self._user_activated_playback
             and not self._manual_pause_lock
+            and not self._spotify_launch_lock
             and not self.playback.pause_intent_active
             and self.carousel.settled
             and not self.touch.dragging
@@ -2129,7 +2622,7 @@ class Mello:
         else:
             # Throttled diagnostics: why focus-gate is blocking play requests.
             now = time.time()
-            if now - self._last_focus_gate_log > 3.0:
+            if self.app_screen == AppScreen.SPOTIFY and now - self._last_focus_gate_log > 3.0:
                 reason = (
                     f'startup_ready={self._startup_ready}, connected={self.connected}, '
                     f'status_ready={(time.time() - self._last_status_ok_at) < 4.0 and not self._status_unknown}, '
@@ -2176,6 +2669,10 @@ class Mello:
                     self._requested_focus_since = 0.0
             else:
                 self._reset_pending_focus('stable_gate_blocked')
+
+        if self.app_screen == AppScreen.CHECKPOD:
+            self._update_checkpod_autoplay(focused_item)
+            self._save_checkpod_progress_if_due()
         
         # Check long press for delete mode
         if self.touch.check_long_press():
@@ -2209,8 +2706,9 @@ class Mello:
         
         self._sync_to_playing()
         
-        self.playback.update_mock(dt, self.now_playing)
-        self.playback.save_progress(self.now_playing)
+        if self.app_screen != AppScreen.CHECKPOD:
+            self.playback.update_mock(dt, self.now_playing)
+            self.playback.save_progress(self.now_playing)
         
         # Collect playlist covers in background (once per track change)
         # Guard: context_uri comes from WebSocket (instant) but track_cover comes
@@ -2233,7 +2731,9 @@ class Mello:
         was_awake = not self.sleep_manager.is_sleeping
         # Don't sleep while the setup menu is open (e.g. WiFi AP mode)
         menu_open = self.setup_menu.state != MenuState.CLOSED
-        self.sleep_manager.check_sleep(self.now_playing.playing or menu_open)
+        self.sleep_manager.check_sleep(
+            self.now_playing.playing or self.local_playback.is_active or menu_open
+        )
         if was_awake and self.sleep_manager.is_sleeping:
             self.bluetooth.pause_monitoring()
             idle = time.time() - self.sleep_manager.last_activity
@@ -2242,16 +2742,19 @@ class Mello:
         self.playback.update_loading_state(
             self.now_playing, self.carousel.settled, self._pending_focus_uri is not None
         )
-        self._check_context_switch_watchdog(focused_item)
+        if self.app_screen != AppScreen.CHECKPOD:
+            self._check_context_switch_watchdog(focused_item)
 
         # Root-cause detector: focus is stable and should auto-play, but no request path exists.
         if focused_item is not None and not focused_item.is_temp:
             focused_uri = focused_item.uri
             auto_intent_ready = (
-                self._startup_ready
+                self.app_screen == AppScreen.SPOTIFY
+                and self._startup_ready
                 and self.connected
                 and self._user_activated_playback
                 and not self._manual_pause_lock
+                and not self._spotify_launch_lock
                 and not self.playback.pause_intent_active
                 and self.carousel.settled
                 and not self.touch.dragging
@@ -2304,7 +2807,13 @@ class Mello:
                     )
                 )
             )
-            if expected_loading and not self.playback.play_state.is_loading:
+            now = time.time()
+            if (
+                expected_loading
+                and not self.playback.play_state.is_loading
+                and now - self._last_loader_mismatch_log > 5.0
+            ):
+                self._last_loader_mismatch_log = now
                 logger.warning(
                     'LOADER mismatch | expected_loading=True but is_loading=False | '
                     f'focused_uri={focused_item.uri[:40]} | pending_uri={(self._pending_focus_uri or "none")[:40]} | '
@@ -2315,7 +2824,11 @@ class Mello:
         # Diagnostics for "title above context is wrong while loading/resume"
         # Keep throttled to avoid log spam.
         now = time.time()
-        if now - self._last_title_diag_log > 2.0 and focused_item is not None:
+        if (
+            self.app_screen == AppScreen.SPOTIFY
+            and now - self._last_title_diag_log > 2.0
+            and focused_item is not None
+        ):
             title_source, title_text = self._display_title_for_item(focused_item)
             logger.warning(
                 'TITLE diag | '
@@ -2355,20 +2868,42 @@ class Mello:
     
     def _draw(self):
         """Draw the UI."""
-        items = self.display_items
+        items = self._display_items()
         np = self.now_playing
         focused_item = items[self.selected_index] if self.selected_index < len(items) else None
         focused_uri = focused_item.uri if focused_item else None
-        focused_context_playing = bool(
-            focused_item
-            and np.playing
-            and np.context_uri == focused_uri
-        )
+        if self.app_screen == AppScreen.CHECKPOD:
+            playing, paused, _, _, context_uri, _ = self.local_playback.get_state()
+            focused_context_playing = bool(
+                focused_item and playing and context_uri == focused_uri
+            )
+            is_loading = self._checkpod_play_in_progress
+            is_playing = bool(playing and context_uri == focused_uri)
+            play_in_progress = self._checkpod_play_in_progress
+            pending_focus_uri = self._checkpod_pending_focus_uri
+            requested_focus_uri = None
+        else:
+            focused_context_playing = bool(
+                focused_item
+                and np.playing
+                and np.context_uri == focused_uri
+            )
+            is_loading = self.playback.play_state.is_loading and not focused_context_playing
+            is_playing = self.playback.play_state.display_playing(np.playing)
+            play_in_progress = self.playback.play_in_progress
+            pending_focus_uri = self._pending_focus_uri
+            requested_focus_uri = self._requested_focus_uri
+
         recent_focus_commit = bool(
             focused_uri
             and self._last_play_commit_uri == focused_uri
             and (time.time() - self._last_play_commit_at) < 1.25
         )
+        if self.app_screen == AppScreen.CHECKPOD:
+            recent_focus_commit = False
+            is_loading = is_loading and not focused_context_playing
+        else:
+            is_loading = is_loading and not (focused_context_playing or recent_focus_commit)
 
         # Snapshot BT state once to avoid race with monitor thread
         bt_dev = self.bluetooth.connected_device
@@ -2384,12 +2919,11 @@ class Mello:
             volume_index=self.volume.index,
             delete_mode_id=self.delete_mode_id,
             pressed_button=self._pressed_button,
-            # Hide loader as soon as focused context audio is already playing.
-            is_loading=self.playback.play_state.is_loading and not (focused_context_playing or recent_focus_commit),
-            is_playing=self.playback.play_state.display_playing(np.playing),
-            pending_focus_uri=self._pending_focus_uri,
-            requested_focus_uri=self._requested_focus_uri,
-            play_in_progress=self.playback.play_in_progress,
+            is_loading=is_loading,
+            is_playing=is_playing,
+            pending_focus_uri=pending_focus_uri,
+            requested_focus_uri=requested_focus_uri,
+            play_in_progress=play_in_progress,
             toast_message=self._active_toast,
             menu_state=self.setup_menu.state,
             menu_known_networks=self.setup_menu.known_networks,
@@ -2410,7 +2944,11 @@ class Mello:
             update_available=self.setup_menu._update_available,
             update_running=self.setup_menu._update_running,
             reset_confirm_pending=self.setup_menu._reset_confirm_pending,
+            shutdown_confirm_pending=self.setup_menu._shutdown_confirm_pending,
             has_network=self._get_cached_network_status(),
+            app_screen=self.app_screen,
+            pin_buffer=self.setup_menu.pin_buffer,
+            change_pin_step=self.setup_menu.change_pin_step,
         )
         dirty_rects = self.renderer.draw(ctx)
         if self.delete_mode_id and self.renderer.delete_button_rect:

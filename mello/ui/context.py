@@ -4,7 +4,7 @@ Render Context - Bundles all state needed for rendering.
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-from ..models import CatalogItem, MenuState, NowPlaying
+from ..models import CatalogItem, MenuState, NowPlaying, AppScreen
 from ..managers.bluetooth import BluetoothDevice
 
 
@@ -43,8 +43,12 @@ class RenderContext:
     volume_levels: list = field(default_factory=list)  # For volume settings screen
     menu_scroll_offset: int = 0
     reset_confirm_pending: bool = False
+    shutdown_confirm_pending: bool = False
     update_checking: bool = False
     update_available: bool = False
     update_running: bool = False
     has_network: bool = True
+    app_screen: AppScreen = AppScreen.HOME
+    pin_buffer: str = ''
+    change_pin_step: int = 0
 

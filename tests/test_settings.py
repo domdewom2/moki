@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from mello.managers.settings import Settings, DEFAULT_AUTO_PAUSE_MINUTES, DEFAULT_PROGRESS_EXPIRY_HOURS
+from mello.config import DEFAULT_ADMIN_PIN, PIN_LENGTH
 
 
 @pytest.fixture
@@ -21,6 +22,7 @@ class TestSettingsDefaults:
         s = Settings(path=settings_path)
         assert s.auto_pause_minutes == DEFAULT_AUTO_PAUSE_MINUTES
         assert s.progress_expiry_hours == DEFAULT_PROGRESS_EXPIRY_HOURS
+        assert s.admin_pin == DEFAULT_ADMIN_PIN
 
     def test_auto_pause_timeout_in_seconds(self, settings_path):
         s = Settings(path=settings_path)
@@ -51,6 +53,37 @@ class TestSettingsPersistence:
         for _ in range(len(AUTO_PAUSE_OPTIONS)):
             s.cycle_auto_pause()
         assert s.auto_pause_minutes == first
+
+
+class TestAdminPin:
+    def test_default_pin(self, settings_path):
+        s = Settings(path=settings_path)
+        assert s.admin_pin == DEFAULT_ADMIN_PIN
+
+    def test_set_admin_pin_persists(self, settings_path):
+        s = Settings(path=settings_path)
+        s.set_admin_pin('4321')
+        assert s.admin_pin == '4321'
+        s2 = Settings(path=settings_path)
+        assert s2.admin_pin == '4321'
+
+    def test_invalid_pin_rejected(self, settings_path):
+        s = Settings(path=settings_path)
+        with pytest.raises(ValueError):
+            s.set_admin_pin('12')
+        with pytest.raises(ValueError):
+            s.set_admin_pin('abcd')
+
+    def test_admin_pin_saved_in_json(self, settings_path):
+        s = Settings(path=settings_path)
+        s.set_admin_pin('9876')
+        data = json.loads(settings_path.read_text())
+        assert data['admin_pin'] == '9876'
+
+    def test_invalid_stored_pin_uses_default(self, settings_path):
+        settings_path.write_text(json.dumps({'admin_pin': 'bad'}))
+        s = Settings(path=settings_path)
+        assert s.admin_pin == DEFAULT_ADMIN_PIN
 
 
 class TestShareUsageData:

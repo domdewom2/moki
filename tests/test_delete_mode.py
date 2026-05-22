@@ -17,7 +17,7 @@ sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
 from mello.app import Mello
-from mello.models import CatalogItem
+from mello.models import CatalogItem, AppScreen
 
 
 def _item(item_id='1') -> CatalogItem:
@@ -39,6 +39,7 @@ def _make_app(rect=(10, 10, 50, 50)) -> Mello:
     app._delete_button_rect = rect
     app._deleting = False
     app.setup_menu = SimpleNamespace(is_open=False)
+    app.app_screen = AppScreen.SPOTIFY
     app.renderer = SimpleNamespace(
         delete_button_rect=rect,
         add_button_rect=None,
