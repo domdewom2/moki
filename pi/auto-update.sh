@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mello Auto-Update Script
-# Runs via cron, checks GitHub and applies ALL changes
+# Moki Auto-Update Script
+# Triggered manually from Settings → Check for update (not via cron).
 #
 # The entire script body is wrapped in main() so bash reads it fully into
 # memory before executing.  This prevents corruption when git pull updates
@@ -44,7 +44,7 @@ log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') [auto-update] $*"
 }
 
-# Avoid overlapping updates from cron/manual invocations.
+# Avoid overlapping updates from manual invocations.
 LOCK_FILE="/tmp/mello-auto-update.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -52,15 +52,23 @@ if ! flock -n 9; then
   exit 0
 fi
 
-REPO_URL="https://github.com/emieljanson/mello.git"
+# Use the configured git remote (your fork). Fall back for fresh installs.
+REPO_URL="$(git remote get-url origin 2>/dev/null || true)"
+if [ -z "$REPO_URL" ]; then
+  REPO_URL="https://github.com/domdewom2/moki.git"
+fi
+UPDATE_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+if [ "$UPDATE_BRANCH" = "HEAD" ]; then
+  UPDATE_BRANCH="main"
+fi
 
 # Ensure we have a healthy git repo.  If .git is missing or fetch fails for
 # non-network reasons (corrupt repo, no remote, manual SCP deploy, etc.),
 # re-clone from scratch while preserving user data.
 _ensure_git_repo() {
-  # Quick health-check: is this a valid git repo with the right remote?
+  # Quick health-check: is this a valid git repo with an origin remote?
   if git rev-parse --git-dir >/dev/null 2>&1 \
-     && git remote get-url origin 2>/dev/null | grep -q "emieljanson/mello"; then
+     && git remote get-url origin >/dev/null 2>&1; then
     return 0  # repo looks fine
   fi
 
@@ -111,7 +119,7 @@ _ensure_git_repo() {
   cd "$current"
 
   # Unshallow so future fetches work normally
-  git fetch --unshallow origin main 2>/dev/null || true
+  git fetch --unshallow origin "$UPDATE_BRANCH" 2>/dev/null || true
 
   # Restore user data and env
   if [ -d "$data_backup" ]; then
@@ -145,14 +153,14 @@ _ensure_git_repo() {
 
 _ensure_git_repo
 
-# Always converge to origin/main regardless of local state.
-if ! git fetch origin main 2>/dev/null; then
+# Always converge to origin/$UPDATE_BRANCH regardless of local state.
+if ! git fetch origin "$UPDATE_BRANCH" 2>/dev/null; then
   log "Fetch failed (network issue?), will retry next run"
   exit 0
 fi
 
 LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
+REMOTE=$(git rev-parse "origin/$UPDATE_BRANCH")
 
 if [ "$LOCAL" = "$REMOTE" ]; then
   exit 0  # No updates
@@ -171,9 +179,9 @@ if [ -d data ] && [ "$(ls -A data/ 2>/dev/null)" ]; then
   cp -a data "$DATA_BACKUP"
 fi
 
-# Hard reset to origin/main — always converge to the target state
-git checkout main 2>/dev/null || true
-git reset --hard origin/main
+# Hard reset to origin/$UPDATE_BRANCH — always converge to the target state
+git checkout "$UPDATE_BRANCH" 2>/dev/null || true
+git reset --hard "origin/$UPDATE_BRANCH"
 
 # Restore any data files that git pull deleted
 if [ -d "$DATA_BACKUP" ]; then

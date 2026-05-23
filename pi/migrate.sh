@@ -852,6 +852,21 @@ _migrate_019() {
 }
 
 # ============================================
+# Migration 020: Remove nightly auto-update cron job
+# ============================================
+_migrate_020() {
+  local before after
+  before="$(crontab -l 2>/dev/null || true)"
+  after="$(printf '%s\n' "$before" | grep -v 'berry/pi/auto-update\|tomo/pi/auto-update\|mello/pi/auto-update\|moki/pi/auto-update' || true)"
+  if [ "$before" != "$after" ]; then
+    printf '%s\n' "$after" | crontab -
+    log "Removed auto-update cron job (updates are manual via Settings)"
+  else
+    log "No auto-update cron job found"
+  fi
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -873,3 +888,4 @@ run_migration "016" "Install mpv for CheckPod playback"
 run_migration "017" "Disable WiFi power save"
 run_migration "018" "Allow WiFi sleep recovery"
 run_migration "019" "Prefer 2.4 GHz WiFi"
+run_migration "020" "Remove auto-update cron job"
