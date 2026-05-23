@@ -219,7 +219,7 @@ fi
 # ============================================
 if [ -d /usr/share/plymouth/themes/mello ]; then
   PLYMOUTH_CHANGED=false
-  for f in mello-logo-boot.png mello.script mello.plymouth; do
+  for f in moki-boot.png mello.script mello.plymouth; do
     if ! diff -q "$CODE_DIR/pi/plymouth/$f" "/usr/share/plymouth/themes/mello/$f" &>/dev/null; then
       PLYMOUTH_CHANGED=true
       break

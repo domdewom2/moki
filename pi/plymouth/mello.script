@@ -1,5 +1,13 @@
 Window.SetBackgroundTopColor(0, 0, 0);
 Window.SetBackgroundBottomColor(0, 0, 0);
 
-fun refresh_callback() {}
+logo_image = Image("moki-boot.png");
+logo_sprite = Sprite(logo_image);
+
+fun refresh_callback() {
+    logo_sprite.SetX((Window.GetWidth() - logo_image.GetWidth()) / 2);
+    logo_sprite.SetY((Window.GetHeight() - logo_image.GetHeight()) / 2);
+}
+
 Plymouth.SetRefreshFunction(refresh_callback);
+refresh_callback();
