@@ -1,4 +1,4 @@
-# Mello - Pygame UI
+# Moki - Pygame UI
 # pygame is installed via apt (python3-pygame) for SDL 2.32+ / kmsdrm support.
 # Do NOT add it here — the venv uses --system-site-packages to pick it up.
 requests>=2.31.0

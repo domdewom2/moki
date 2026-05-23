@@ -1,0 +1,27 @@
+[Unit]
+Description=Moki Music Player
+After=moki-touch-fix.service
+Wants=moki-librespot.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+User=__USER__
+SupplementaryGroups=video audio input render bluetooth
+WorkingDirectory=__HOME__/moki
+ExecStartPre=-/bin/bash -c 'LOG=__HOME__/moki/moki.log; [ -s "$LOG" ] && mv "$LOG" "$LOG.$(date +%%Y%%m%%d-%%H%%M%%S)"; find __HOME__/moki -maxdepth 1 -name "moki.log.*" \( -mtime +7 -o -size +50M \) -delete'
+ExecStart=__HOME__/moki/venv/bin/python -u moki.py --fullscreen
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+StandardOutput=append:__HOME__/moki/moki.log
+StandardError=append:__HOME__/moki/moki.log
+StandardInput=tty
+TTYPath=/dev/tty1
+PAMName=login
+Environment=HOME=__HOME__
+Environment=XDG_RUNTIME_DIR=/run/user/__UID__
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/__UID__/bus
+
+[Install]
+WantedBy=multi-user.target

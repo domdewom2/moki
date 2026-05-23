@@ -20,16 +20,16 @@ pygame_stub.font = SimpleNamespace(Font=object)
 sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
-from mello.api.ard_audiothek import parse_episodes
-from mello.app import Mello
-from mello.models import AppScreen, CatalogItem, NowPlaying
-from mello.managers.checkpod_manager import (
+from moki.api.ard_audiothek import parse_episodes
+from moki.app import Moki
+from moki.models import AppScreen, CatalogItem, NowPlaying
+from moki.managers.checkpod_manager import (
     CheckPodManager,
     _fit_cover_to_square,
     _fit_width_letterbox,
     _prepare_checkpod_cover,
 )
-from mello.controllers.local_playback import LocalPlaybackController
+from moki.controllers.local_playback import LocalPlaybackController
 from PIL import Image
 
 
@@ -58,7 +58,7 @@ SAMPLE_GRAPHQL_RESPONSE = {
 
 
 def test_fit_cover_to_square_preserves_full_image():
-    from mello.config import COLORS
+    from moki.config import COLORS
     wide = Image.new('RGBA', (400, 225), (255, 0, 0, 255))
     result = _fit_cover_to_square(wide, 410)
     assert result.size == (410, 410)
@@ -68,7 +68,7 @@ def test_fit_cover_to_square_preserves_full_image():
 
 
 def test_fit_width_letterbox_preserves_full_width():
-    from mello.config import COLORS
+    from moki.config import COLORS
     wide = Image.new('RGBA', (448, 252), (255, 0, 0, 255))
     result = _fit_width_letterbox(wide, 410)
     assert result.size == (410, 410)
@@ -79,7 +79,7 @@ def test_fit_width_letterbox_preserves_full_width():
 
 
 def test_prepare_checkpod_cover_letterbox_not_stretched():
-    from mello.config import COLORS
+    from moki.config import COLORS
     wide = Image.new('RGBA', (448, 252), (255, 0, 0, 255))
     result = _prepare_checkpod_cover(wide, 410)
     assert result.size == (410, 410)
@@ -107,17 +107,17 @@ def test_checkpod_manager_cache_on_play(tmp_path, monkeypatch):
     catalog_path = cache_dir / 'catalog.json'
     progress_path = cache_dir / 'progress.json'
     images_dir = cache_dir / 'images'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
 
     manager = CheckPodManager()
     episode_id = '123'
     mp3_path = manager.cached_mp3_path(episode_id)
     mp3_path.write_bytes(b'fake-mp3')
 
-    with patch('mello.managers.checkpod_manager.requests.get') as mock_get:
+    with patch('moki.managers.checkpod_manager.requests.get') as mock_get:
         path = manager.ensure_cached(episode_id, 'https://example.com/ep.mp3')
         mock_get.assert_not_called()
     assert path == mp3_path
@@ -125,17 +125,17 @@ def test_checkpod_manager_cache_on_play(tmp_path, monkeypatch):
 
 def test_checkpod_manager_downloads_when_missing(tmp_path, monkeypatch):
     cache_dir = tmp_path / 'checkpod'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
 
     manager = CheckPodManager()
     mock_resp = MagicMock()
     mock_resp.iter_content.return_value = [b'abc', b'def']
     mock_resp.raise_for_status = MagicMock()
 
-    with patch('mello.managers.checkpod_manager.requests.get', return_value=mock_resp):
+    with patch('moki.managers.checkpod_manager.requests.get', return_value=mock_resp):
         path = manager.ensure_cached('999', 'https://example.com/ep.mp3')
 
     assert path is not None
@@ -143,8 +143,8 @@ def test_checkpod_manager_downloads_when_missing(tmp_path, monkeypatch):
 
 
 def test_local_playback_uses_wm8960_audio_device():
-    from mello.config import WM8960_SINK
-    from mello.controllers.local_playback import MPV_AUDIO_DEVICE
+    from moki.config import WM8960_SINK
+    from moki.controllers.local_playback import MPV_AUDIO_DEVICE
 
     assert MPV_AUDIO_DEVICE == f'pipewire/{WM8960_SINK}'
 
@@ -206,7 +206,7 @@ def test_local_playback_seek_relative_when_idle():
 
 
 def test_seek_checkpod_saves_progress():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.local_playback = SimpleNamespace(
         get_state=lambda: (True, False, 40000, 60000, 'urn:ard:episode:1', 'Test'),
         seek_relative=lambda delta: True,
@@ -214,7 +214,7 @@ def test_seek_checkpod_saves_progress():
     app.checkpod_manager = SimpleNamespace(save_progress=MagicMock())
     app.renderer = SimpleNamespace(invalidate=MagicMock())
 
-    Mello._seek_checkpod(app, 30)
+    Moki._seek_checkpod(app, 30)
 
     app.checkpod_manager.save_progress.assert_called_once_with(
         'urn:ard:episode:1', 40000, 60000, 'Test', force=True
@@ -229,10 +229,10 @@ def test_checkpod_cleanup_deletes_stale_download(tmp_path, monkeypatch):
     images_dir = cache_dir / 'images'
     cache_dir.mkdir(parents=True)
     progress_path = cache_dir / 'progress.json'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
 
     manager = CheckPodManager()
 
@@ -283,7 +283,7 @@ def test_checkpod_cleanup_deletes_stale_download(tmp_path, monkeypatch):
 
 
 def test_checkpod_sleep_blocks_only_while_playing_not_paused():
-    from mello.managers.sleep import SleepManager
+    from moki.managers.sleep import SleepManager
 
     mgr = SleepManager()
     mgr.reset_timer()
@@ -299,7 +299,7 @@ def test_checkpod_sleep_blocks_only_while_playing_not_paused():
 
 
 def test_open_checkpod_screen_sets_launch_lock():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.HOME
     app._checkpod_launch_lock = False
     app._spotify_launch_lock = False
@@ -323,8 +323,8 @@ def test_open_checkpod_screen_sets_launch_lock():
     )
     app.local_playback = SimpleNamespace(warm_up=MagicMock(), get_state=lambda: (False, False, 0, 0, None, ''))
 
-    with patch('mello.app.run_async') as mock_async:
-        Mello._open_checkpod_screen(app)
+    with patch('moki.app.run_async') as mock_async:
+        Moki._open_checkpod_screen(app)
 
     assert app.app_screen == AppScreen.CHECKPOD
     assert app._checkpod_launch_lock is True
@@ -335,7 +335,7 @@ def test_open_checkpod_screen_sets_launch_lock():
 
 
 def test_open_home_screen_stops_local_playback():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.CHECKPOD
     app._checkpod_launch_lock = True
     app._checkpod_play_in_progress = True
@@ -346,7 +346,7 @@ def test_open_home_screen_stops_local_playback():
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
 
-    Mello._open_home_screen(app)
+    Moki._open_home_screen(app)
 
     app._pause_active_playback.assert_called_once_with('home_open')
     assert app.app_screen == AppScreen.HOME
@@ -354,7 +354,7 @@ def test_open_home_screen_stops_local_playback():
 
 
 def test_home_checker_tap_opens_checkpod():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._pressed_button = 'home_checker'
     app.renderer = SimpleNamespace(
         home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: p == (100, 100)),
@@ -368,9 +368,9 @@ def test_home_checker_tap_opens_checkpod():
 
 
 def test_refresh_status_skips_spotify_sync_on_checkpod():
-    from mello.models import NowPlaying
+    from moki.models import NowPlaying
 
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.CHECKPOD
     app.api = SimpleNamespace(status=lambda: {'playing': True, 'context_uri': 'spotify:album:1'}, is_connected=lambda: True)
     app.events = SimpleNamespace(context_uri='spotify:album:1')
@@ -390,21 +390,21 @@ def test_refresh_status_skips_spotify_sync_on_checkpod():
         track_name='CheckPod Episode',
     )
 
-    Mello._refresh_status(app)
+    Moki._refresh_status(app)
 
     assert app._now_playing.context_uri == 'urn:ard:episode:16407475'
     assert app._now_playing.track_name == 'CheckPod Episode'
 
 
 def test_play_checkpod_item_dedupes_same_uri():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._checkpod_play_in_progress = True
     app._checkpod_play_target_uri = 'urn:ard:episode:1'
     app.checkpod_manager = SimpleNamespace(get_episode_id_for_uri=lambda uri: '1')
     app._show_toast = MagicMock()
 
-    with patch('mello.app.run_async') as mock_async:
-        Mello._play_checkpod_item(
+    with patch('moki.app.run_async') as mock_async:
+        Moki._play_checkpod_item(
             app,
             SimpleNamespace(uri='urn:ard:episode:1', name='Test'),
         )
@@ -413,7 +413,7 @@ def test_play_checkpod_item_dedupes_same_uri():
 
 
 def test_checkpod_paused_episode_renders_play_button():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     item = CatalogItem(
         id='16407475',
         uri='urn:ard:episode:16407475',
@@ -471,7 +471,7 @@ def test_checkpod_paused_episode_renders_play_button():
     app._get_cached_network_status = lambda: True
     app.renderer = SimpleNamespace(draw=MagicMock(return_value=[]), delete_button_rect=None)
 
-    Mello._draw(app)
+    Moki._draw(app)
 
     ctx = app.renderer.draw.call_args.args[0]
     assert ctx.is_playing is False
@@ -481,10 +481,10 @@ def test_checkpod_save_progress_rejects_regression(tmp_path, monkeypatch):
     cache_dir = tmp_path / 'checkpod'
     cache_dir.mkdir(parents=True)
     progress_path = cache_dir / 'progress.json'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
 
     manager = CheckPodManager()
     uri = 'urn:ard:episode:1'
@@ -503,10 +503,10 @@ def test_get_last_played_uri_returns_most_recent(tmp_path, monkeypatch):
     cache_dir = tmp_path / 'checkpod'
     cache_dir.mkdir(parents=True)
     progress_path = cache_dir / 'progress.json'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
 
     manager = CheckPodManager()
     progress_path.write_text(json.dumps({
@@ -533,10 +533,10 @@ def test_get_last_played_uri_skips_near_complete(tmp_path, monkeypatch):
     cache_dir = tmp_path / 'checkpod'
     cache_dir.mkdir(parents=True)
     progress_path = cache_dir / 'progress.json'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
 
     manager = CheckPodManager()
     progress_path.write_text(json.dumps({
@@ -560,7 +560,7 @@ def test_get_last_played_uri_skips_near_complete(tmp_path, monkeypatch):
 
 
 def test_restore_checkpod_carousel_focus():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._last_checkpod_context_uri = None
     app.carousel = SimpleNamespace(set_target=MagicMock())
     app.checkpod_manager = SimpleNamespace(
@@ -572,14 +572,14 @@ def test_restore_checkpod_carousel_focus():
         get_last_played_uri=lambda fallback_uri=None: 'urn:ard:episode:2',
     )
 
-    Mello._restore_checkpod_carousel_focus(app)
+    Moki._restore_checkpod_carousel_focus(app)
 
     assert app.selected_index == 1
     app.carousel.set_target.assert_called_once_with(1)
 
 
 def test_save_checkpod_progress_now_uses_live_position():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._last_checkpod_progress_save = 0.0
     app._last_checkpod_context_uri = None
     app.local_playback = SimpleNamespace(
@@ -588,7 +588,7 @@ def test_save_checkpod_progress_now_uses_live_position():
     )
     app.checkpod_manager = SimpleNamespace(save_progress=MagicMock())
 
-    Mello._save_checkpod_progress_now(app, 'home_open')
+    Moki._save_checkpod_progress_now(app, 'home_open')
 
     app.checkpod_manager.save_progress.assert_called_once_with(
         'urn:ard:episode:1', 180000, 600000, 'Episode', force=True
@@ -597,7 +597,7 @@ def test_save_checkpod_progress_now_uses_live_position():
 
 
 def test_pause_active_playback_saves_before_stop():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._last_checkpod_progress_save = 0.0
     app._last_checkpod_context_uri = None
     app._now_playing_lock = __import__('threading').Lock()
@@ -615,7 +615,7 @@ def test_pause_active_playback_saves_before_stop():
     )
     app.checkpod_manager = SimpleNamespace(save_progress=MagicMock())
 
-    Mello._pause_active_playback(app, 'home_open')
+    Moki._pause_active_playback(app, 'home_open')
 
     app.checkpod_manager.save_progress.assert_called_once()
     app.local_playback.stop.assert_called_once_with(save_progress=False)
@@ -649,16 +649,16 @@ def test_play_checkpod_item_resumes_from_saved_progress(tmp_path, monkeypatch):
     mp3 = cache_dir / '16407475.mp3'
     mp3.write_bytes(b'fake')
     progress_path = cache_dir / 'progress.json'
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
 
     manager = CheckPodManager()
     uri = 'urn:ard:episode:16407475'
     manager.save_progress(uri, 150000, 600000, 'Reis')
 
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._checkpod_play_in_progress = False
     app._checkpod_play_target_uri = None
     app._checkpod_play_failed_uri = None
@@ -683,15 +683,15 @@ def test_play_checkpod_item_resumes_from_saved_progress(tmp_path, monkeypatch):
     item = CatalogItem(id='16407475', uri=uri, name='Reis', images=[])
 
     with patch.object(manager, 'get_audio_url', return_value='https://example.com/ep.mp3'):
-        with patch('mello.app.run_async', side_effect=lambda fn: fn()):
-            Mello._play_checkpod_item(app, item)
+        with patch('moki.app.run_async', side_effect=lambda fn: fn()):
+            Moki._play_checkpod_item(app, item)
 
     assert played['start_position_ms'] == 150000
     assert played['context_uri'] == uri
 
 
 def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.CHECKPOD
     item = CatalogItem(id='1', uri='urn:ard:episode:1', name='Test Episode', images=[])
     app.selected_index = 0
@@ -706,7 +706,7 @@ def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
     app._play_checkpod_item = MagicMock()
     app._local_media_manager = lambda: app.checkpod_manager
 
-    Mello._restart_checkpod_episode(app)
+    Moki._restart_checkpod_episode(app)
 
     app.local_playback.stop.assert_called_once_with(save_progress=False)
     app.checkpod_manager.clear_progress.assert_called_once_with('urn:ard:episode:1')

@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 pytest.importorskip('pygame')
 
-from mello.models import CatalogItem, NowPlaying
-from mello.ui.renderer import Renderer
+from moki.models import CatalogItem, NowPlaying
+from moki.ui.renderer import Renderer
 
 
 def _item(uri='spotify:album:test', name='Album'):

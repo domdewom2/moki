@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mello One-Line Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/emieljanson/mello/main/install.sh | bash
+# Moki One-Line Installer
+# Usage: curl -sSL https://raw.githubusercontent.com/domdewom2/moki/main/install.sh | bash
 # Options: --no-analytics  Disable anonymous usage data
 
 set -e
@@ -14,14 +14,14 @@ for arg in "$@"; do
 done
 
 echo ""
-echo "Mello Installer"
+echo "Moki Installer"
 echo "=================="
 echo ""
 
 # Check if already installed
-if [ -d ~/mello ]; then
-  echo "Mello is already installed in ~/mello"
-  echo "   For updates: cd ~/mello && git pull"
+if [ -d ~/moki ]; then
+  echo "Moki is already installed in ~/moki"
+  echo "   For updates: cd ~/moki && git pull"
   exit 1
 fi
 
@@ -33,12 +33,12 @@ if ! command -v git &> /dev/null; then
 fi
 
 # Clone repository
-echo "Downloading Mello..."
-git clone https://github.com/emieljanson/mello.git ~/mello
+echo "Downloading Moki..."
+git clone https://github.com/domdewom2/moki.git ~/moki
 
 # Run setup
 echo ""
 echo "Running setup..."
-cd ~/mello/pi
+cd ~/moki/pi
 chmod +x setup.sh
 ./setup.sh $SETUP_FLAGS

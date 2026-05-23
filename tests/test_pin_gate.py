@@ -11,10 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.models import MenuState
-from mello.managers.setup_menu import SetupMenu
-from mello.managers.settings import Settings
-from mello.config import DEFAULT_ADMIN_PIN, PIN_LENGTH
+from moki.models import MenuState
+from moki.managers.setup_menu import SetupMenu
+from moki.managers.settings import Settings
+from moki.config import DEFAULT_ADMIN_PIN, PIN_LENGTH
 
 
 def _make_pin_menu(admin_pin: str = DEFAULT_ADMIN_PIN):

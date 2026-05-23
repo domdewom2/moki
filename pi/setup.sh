@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mello First-Time Setup Script
+# Moki First-Time Setup Script
 # Run this ONCE on a new Raspberry Pi (Lite or Desktop)
 
 set -euo pipefail
@@ -13,22 +13,22 @@ for arg in "$@"; do
 done
 
 # Detect installing user (used for systemd services, permissions, sudoers)
-MELLO_USER="$USER"
-MELLO_HOME="$HOME"
-MELLO_UID="$(id -u)"
+MOKI_USER="$USER"
+MOKI_HOME="$HOME"
+MOKI_UID="$(id -u)"
 
 # Render a .service.template file and install it to systemd
 install_service() {
   local template="$1"
   local name
   name=$(basename "$template" .template)
-  sed -e "s|__USER__|$MELLO_USER|g" \
-      -e "s|__HOME__|$MELLO_HOME|g" \
-      -e "s|__UID__|$MELLO_UID|g" \
+  sed -e "s|__USER__|$MOKI_USER|g" \
+      -e "s|__HOME__|$MOKI_HOME|g" \
+      -e "s|__UID__|$MOKI_UID|g" \
       "$template" | sudo tee "/etc/systemd/system/$name" > /dev/null
 }
 
-echo "Mello Setup Starting..."
+echo "Moki Setup Starting..."
 echo ""
 
 # ============================================
@@ -46,7 +46,7 @@ sudo apt-get install -y \
 
 # Keep the Pi reachable for SSH/Spotify while the display is asleep.
 sudo mkdir -p /etc/NetworkManager/conf.d
-cat << 'EOF' | sudo tee /etc/NetworkManager/conf.d/99-mello-wifi-powersave.conf > /dev/null
+cat << 'EOF' | sudo tee /etc/NetworkManager/conf.d/99-moki-wifi-powersave.conf > /dev/null
 [connection]
 wifi.powersave = 2
 EOF
@@ -87,7 +87,7 @@ if [ -n "$BOOT_CONFIG" ]; then
   if ! grep -q "vc4-kms-dsi-ili9881-5inch" "$BOOT_CONFIG" 2>/dev/null; then
     {
       echo ""
-      echo "# Mello: Raspberry Pi Touch Display 2 (5\", landscape)"
+      echo "# Moki: Raspberry Pi Touch Display 2 (5\", landscape)"
       echo "disable_splash=1"
       echo "dtoverlay=vc4-kms-dsi-ili9881-5inch,rotation=90"
     } | sudo tee -a "$BOOT_CONFIG" > /dev/null
@@ -104,12 +104,12 @@ if [ -n "$BOOT_CONFIG" ]; then
     BOOT_CHANGED=true
   fi
 
-  # Plymouth boot splash (Mello logo on black during boot)
+  # Plymouth boot splash (Moki logo on black during boot)
   echo "Installing Plymouth boot splash..."
   sudo apt-get install -y -qq plymouth plymouth-themes
-  sudo mkdir -p /usr/share/plymouth/themes/mello
-  sudo cp ~/mello/pi/plymouth/* /usr/share/plymouth/themes/mello/
-  sudo plymouth-set-default-theme mello
+  sudo mkdir -p /usr/share/plymouth/themes/moki
+  sudo cp ~/moki/pi/plymouth/* /usr/share/plymouth/themes/moki/
+  sudo plymouth-set-default-theme moki
   if [ -f "$BOOT_CMDLINE" ] && ! grep -q "plymouth.ignore-serial-consoles" "$BOOT_CMDLINE"; then
     sudo sed -i 's/$/ plymouth.ignore-serial-consoles/' "$BOOT_CMDLINE"
   fi
@@ -141,7 +141,7 @@ if ! aplay -l 2>/dev/null | grep -q "wm8960"; then
   if git clone https://github.com/waveshare/WM8960-Audio-HAT.git /tmp/wm8960 2>/dev/null; then
     cd /tmp/wm8960
     sudo ./install.sh && echo "  WM8960 driver installed" || echo "  WM8960 install script failed"
-    cd ~/mello
+    cd ~/moki
     rm -rf /tmp/wm8960
     BOOT_CHANGED=true
   else
@@ -180,7 +180,7 @@ mkdir -p ~/.config/go-librespot
 
 if [ ! -f ~/.config/go-librespot/config.yml ]; then
   cat > ~/.config/go-librespot/config.yml << 'EOF'
-device_name: "Mello"
+device_name: "Moki"
 device_type: "speaker"
 audio_backend: "alsa"
 external_volume: true
@@ -229,24 +229,24 @@ if [ ! -f /usr/local/bin/wifi-connect ]; then
     # Download UI assets (separate package)
     WC_UI_URL=$(curl -sL https://api.github.com/repos/balena-os/wifi-connect/releases/latest \
       | grep "browser_download_url.*wifi-connect-ui\.tar\.gz" | head -1 | cut -d '"' -f 4)
-    # Install Mello custom portal UI (overrides default wifi-connect UI)
+    # Install Moki custom portal UI (overrides default wifi-connect UI)
     sudo mkdir -p /usr/local/share/wifi-connect/ui
-    sudo cp ~/mello/portal/index.html /usr/local/share/wifi-connect/ui/index.html
-    echo "  Mello portal UI installed"
+    sudo cp ~/moki/portal/index.html /usr/local/share/wifi-connect/ui/index.html
+    echo "  Moki portal UI installed"
   fi
 else
   echo "WiFi Connect already installed"
-  # Always update Mello portal UI (may have changed)
+  # Always update Moki portal UI (may have changed)
   sudo mkdir -p /usr/local/share/wifi-connect/ui
-  sudo cp ~/mello/portal/index.html /usr/local/share/wifi-connect/ui/index.html
-  echo "Mello portal UI updated"
+  sudo cp ~/moki/portal/index.html /usr/local/share/wifi-connect/ui/index.html
+  echo "Moki portal UI updated"
 fi
 
 # ============================================
 # 7. Setup Python virtual environment
 # ============================================
 echo "Setting up Python environment..."
-cd ~/mello
+cd ~/moki
 
 if [ ! -d "venv" ]; then
   python3 -m venv --system-site-packages venv
@@ -273,8 +273,8 @@ else
 fi
 
 # Write to settings.json (merge with existing if present)
-SETTINGS_FILE=~/mello/data/settings.json
-mkdir -p ~/mello/data
+SETTINGS_FILE=~/moki/data/settings.json
+mkdir -p ~/moki/data
 if [ -f "$SETTINGS_FILE" ]; then
   # Update existing settings file
   python3 -c "
@@ -290,81 +290,81 @@ else
 fi
 
 # Save install environment (used by auto-update and migrations)
-cat > ~/mello/.mello-env << EOF
-MELLO_USER=$MELLO_USER
-MELLO_HOME=$MELLO_HOME
-MELLO_UID=$MELLO_UID
+cat > ~/moki/.moki-env << EOF
+MOKI_USER=$MOKI_USER
+MOKI_HOME=$MOKI_HOME
+MOKI_UID=$MOKI_UID
 EOF
 
 # ============================================
 # 9. Setup systemd services
 # ============================================
 echo "Setting up systemd services..."
-for tmpl in ~/mello/pi/systemd/*.service.template; do
+for tmpl in ~/moki/pi/systemd/*.service.template; do
   install_service "$tmpl"
 done
-sudo ln -sf ~/mello/pi/systemd/mello-touch-fix.service /etc/systemd/system/
+sudo ln -sf ~/moki/pi/systemd/moki-touch-fix.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl disable mello-wifi 2>/dev/null || true
-sudo rm -f /etc/systemd/system/mello-wifi.service
-sudo systemctl enable mello-librespot mello-native mello-touch-fix
+sudo systemctl disable moki-wifi 2>/dev/null || true
+sudo rm -f /etc/systemd/system/moki-wifi.service
+sudo systemctl enable moki-librespot moki-native moki-touch-fix
 
 # Enable PipeWire user services (Bluetooth audio routing)
-sudo -u "$MELLO_USER" XDG_RUNTIME_DIR=/run/user/$MELLO_UID systemctl --user enable pipewire pipewire-pulse wireplumber 2>/dev/null || true
+sudo -u "$MOKI_USER" XDG_RUNTIME_DIR=/run/user/$MOKI_UID systemctl --user enable pipewire pipewire-pulse wireplumber 2>/dev/null || true
 
 # ============================================
 # 10. Setup permissions (display, audio, touch, backlight)
 # ============================================
 echo "Setting up permissions..."
 
-# Ensure dedicated runtime group exists for Mello-controlled hardware nodes.
-if ! getent group mello >/dev/null; then
-  sudo groupadd --system mello
+# Ensure dedicated runtime group exists for Moki-controlled hardware nodes.
+if ! getent group moki >/dev/null; then
+  sudo groupadd --system moki
 fi
 
 # Add installing user to required groups.
-sudo usermod -aG video,audio,input,bluetooth,mello "$MELLO_USER" 2>/dev/null || true
+sudo usermod -aG video,audio,input,bluetooth,moki "$MOKI_USER" 2>/dev/null || true
 
 # Backlight control (for sleep mode) — udev rule + apply immediately
-echo 'SUBSYSTEM=="backlight", RUN+="/bin/chgrp mello /sys/class/backlight/%k/brightness /sys/class/backlight/%k/bl_power", RUN+="/bin/chmod 660 /sys/class/backlight/%k/brightness /sys/class/backlight/%k/bl_power"' \
+echo 'SUBSYSTEM=="backlight", RUN+="/bin/chgrp moki /sys/class/backlight/%k/brightness /sys/class/backlight/%k/bl_power", RUN+="/bin/chmod 660 /sys/class/backlight/%k/brightness /sys/class/backlight/%k/bl_power"' \
   | sudo tee /etc/udev/rules.d/99-backlight.rules > /dev/null
-sudo chgrp mello /sys/class/backlight/*/bl_power /sys/class/backlight/*/brightness 2>/dev/null || true
+sudo chgrp moki /sys/class/backlight/*/bl_power /sys/class/backlight/*/brightness 2>/dev/null || true
 sudo chmod 660 /sys/class/backlight/*/bl_power /sys/class/backlight/*/brightness 2>/dev/null || true
 
 # DRM/KMS access for pygame kmsdrm driver (card + render nodes)
-cat << 'UDEV' | sudo tee /etc/udev/rules.d/99-mello-drm.rules > /dev/null
+cat << 'UDEV' | sudo tee /etc/udev/rules.d/99-moki-drm.rules > /dev/null
 SUBSYSTEM=="drm", GROUP="video", MODE="0660"
 SUBSYSTEM=="video4linux", GROUP="video", MODE="0660"
 UDEV
 sudo chmod 660 /dev/dri/card* /dev/dri/render* 2>/dev/null || true
 
 # CPU governor + LED control (for sleep mode energy saving)
-cat << 'UDEV' | sudo tee /etc/udev/rules.d/99-mello-power.rules > /dev/null
-SUBSYSTEM=="cpu", KERNEL=="cpu0", RUN+="/bin/chgrp mello /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", RUN+="/bin/chmod 660 /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
-SUBSYSTEM=="leds", KERNEL=="ACT", RUN+="/bin/chgrp mello /sys/class/leds/ACT/trigger /sys/class/leds/ACT/brightness", RUN+="/bin/chmod 660 /sys/class/leds/ACT/trigger /sys/class/leds/ACT/brightness"
+cat << 'UDEV' | sudo tee /etc/udev/rules.d/99-moki-power.rules > /dev/null
+SUBSYSTEM=="cpu", KERNEL=="cpu0", RUN+="/bin/chgrp moki /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", RUN+="/bin/chmod 660 /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+SUBSYSTEM=="leds", KERNEL=="ACT", RUN+="/bin/chgrp moki /sys/class/leds/ACT/trigger /sys/class/leds/ACT/brightness", RUN+="/bin/chmod 660 /sys/class/leds/ACT/trigger /sys/class/leds/ACT/brightness"
 UDEV
 sudo udevadm control --reload-rules 2>/dev/null || true
 sudo udevadm trigger 2>/dev/null || true
 
-# Disable getty on tty1 so Mello can own the display (kmsdrm requires a free VT)
+# Disable getty on tty1 so Moki can own the display (kmsdrm requires a free VT)
 sudo systemctl mask getty@tty1.service 2>/dev/null || true
 sudo systemctl stop getty@tty1.service 2>/dev/null || true
 
-# Allow Mello app to run wifi-connect, nmcli, and librespot service management
+# Allow Moki app to run wifi-connect, nmcli, and librespot service management
 # without a password prompt (needed for the setup menu)
-TMP_SUDOERS="/tmp/mello-wifi.$$"
+TMP_SUDOERS="/tmp/moki-wifi.$$"
 cat > "$TMP_SUDOERS" << EOF
-$MELLO_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /usr/sbin/iw, /bin/systemctl stop mello-librespot, /bin/systemctl start mello-librespot, /bin/systemctl restart mello-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth, /usr/bin/systemctl poweroff
+$MOKI_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /usr/sbin/iw, /bin/systemctl stop moki-librespot, /bin/systemctl start moki-librespot, /bin/systemctl restart moki-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth, /usr/bin/systemctl poweroff
 EOF
 sudo visudo -cf "$TMP_SUDOERS"
-sudo install -m 440 "$TMP_SUDOERS" /etc/sudoers.d/mello-wifi
+sudo install -m 440 "$TMP_SUDOERS" /etc/sudoers.d/moki-wifi
 rm -f "$TMP_SUDOERS"
 
 # ============================================
 # 11. Prepare manual update script (Settings menu)
 # ============================================
 echo "Preparing manual update script..."
-chmod +x ~/mello/pi/auto-update.sh
+chmod +x ~/moki/pi/auto-update.sh
 # Updates are triggered from Settings → Check for update, not via cron.
 
 # ============================================
@@ -380,7 +380,7 @@ fi
 # ============================================
 echo ""
 echo "============================================"
-echo "Mello setup complete!"
+echo "Moki setup complete!"
 echo "============================================"
 echo ""
 
@@ -389,20 +389,20 @@ if [ "$BOOT_CHANGED" = true ]; then
   echo ""
   echo "  sudo reboot"
   echo ""
-  echo "After reboot, Mello starts automatically."
+  echo "After reboot, Moki starts automatically."
 else
   echo "Starting services..."
-  sudo systemctl start mello-librespot mello-native
+  sudo systemctl start moki-librespot moki-native
   echo ""
-  echo "Mello is running!"
+  echo "Moki is running!"
 fi
 
 echo ""
 echo "Next steps:"
 echo "  1. Open Spotify on your phone"
 echo "  2. Tap the speaker icon"
-echo "  3. Connect to 'Mello'"
+echo "  3. Connect to 'Moki'"
 echo ""
-echo "If WiFi disconnects, Mello creates a"
-echo "'Mello-Setup' hotspot to reconfigure."
+echo "If WiFi disconnects, Moki creates a"
+echo "'Moki-Setup' hotspot to reconfigure."
 echo ""

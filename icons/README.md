@@ -1,4 +1,4 @@
-# Mello Icons
+# Moki Icons
 
 Place PNG icons here with transparent backgrounds.
 

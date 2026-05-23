@@ -1,5 +1,5 @@
 #!/bin/bash
-# Mello Migration Script
+# Moki Migration Script
 # Runs automatically after auto-update (see auto-update.sh step 4).
 # Each migration is idempotent and guarded by a marker file.
 #
@@ -9,30 +9,35 @@
 set -euo pipefail
 
 # Load install environment (username, home, uid)
-# Support old (.berry-env), intermediate (.tomo-env), and new (.mello-env) locations
-if [ -f "$HOME/mello/.mello-env" ]; then
+# Support old (.berry-env), intermediate (.tomo-env/.mello-env), and new (.moki-env)
+if [ -f "$HOME/moki/.moki-env" ]; then
+  source "$HOME/moki/.moki-env"
+elif [ -f "$HOME/mello/.mello-env" ]; then
   source "$HOME/mello/.mello-env"
+  MOKI_USER="${MELLO_USER:-$USER}"
+  MOKI_HOME="${MELLO_HOME:-$HOME}"
+  MOKI_UID="${MELLO_UID:-$(id -u)}"
 elif [ -f "$HOME/tomo/.tomo-env" ]; then
   source "$HOME/tomo/.tomo-env"
-  # Map Tomo variable names to Mello
-  MELLO_USER="${TOMO_USER:-$USER}"
-  MELLO_HOME="${TOMO_HOME:-$HOME}"
-  MELLO_UID="${TOMO_UID:-$(id -u)}"
+  MOKI_USER="${TOMO_USER:-$USER}"
+  MOKI_HOME="${TOMO_HOME:-$HOME}"
+  MOKI_UID="${TOMO_UID:-$(id -u)}"
 elif [ -f "$HOME/berry/.berry-env" ]; then
   source "$HOME/berry/.berry-env"
-  # Map Berry variable names to Mello
-  MELLO_USER="${BERRY_USER:-$USER}"
-  MELLO_HOME="${BERRY_HOME:-$HOME}"
-  MELLO_UID="${BERRY_UID:-$(id -u)}"
+  MOKI_USER="${BERRY_USER:-$USER}"
+  MOKI_HOME="${BERRY_HOME:-$HOME}"
+  MOKI_UID="${BERRY_UID:-$(id -u)}"
 else
-  MELLO_USER="$USER"
-  MELLO_HOME="$HOME"
-  MELLO_UID="$(id -u)"
+  MOKI_USER="$USER"
+  MOKI_HOME="$HOME"
+  MOKI_UID="$(id -u)"
 fi
 
 # Support old, intermediate, and new migration dirs for transition
-MIGRATION_DIR="$HOME/.mello-migrations"
-if [ ! -d "$MIGRATION_DIR" ] && [ -d "$HOME/.tomo-migrations" ]; then
+MIGRATION_DIR="$HOME/.moki-migrations"
+if [ ! -d "$MIGRATION_DIR" ] && [ -d "$HOME/.mello-migrations" ]; then
+  mv "$HOME/.mello-migrations" "$MIGRATION_DIR"
+elif [ ! -d "$MIGRATION_DIR" ] && [ -d "$HOME/.tomo-migrations" ]; then
   mv "$HOME/.tomo-migrations" "$MIGRATION_DIR"
 elif [ ! -d "$MIGRATION_DIR" ] && [ -d "$HOME/.berry-migrations" ]; then
   mv "$HOME/.berry-migrations" "$MIGRATION_DIR"
@@ -867,6 +872,222 @@ _migrate_020() {
 }
 
 # ============================================
+# Migration 021: Mello → Moki rebrand
+# ============================================
+_migrate_021() {
+  log "Starting Mello → Moki rebrand migration"
+
+  # 1. Stop old services
+  sudo systemctl stop mello-native mello-librespot mello-touch-fix 2>/dev/null || true
+
+  # 2. Rename dedicated Linux user mello → moki (if present)
+  if id mello &>/dev/null 2>&1 && ! id moki &>/dev/null 2>&1; then
+    sudo usermod -l moki mello
+    if [ -d /home/mello ]; then
+      sudo usermod -d /home/moki -m moki
+      log "Renamed Linux user mello → moki (/home/moki)"
+    else
+      log "Renamed Linux user mello → moki"
+    fi
+  fi
+
+  # 3. Move code directory ~/mello → ~/moki (non-dedicated-user installs)
+  if [ -d "$HOME/mello" ] && [ ! -d "$HOME/moki" ]; then
+    mv "$HOME/mello" "$HOME/moki"
+    log "Moved ~/mello → ~/moki"
+  elif [ -d "$HOME/mello" ] && [ -d "$HOME/moki" ]; then
+    log "Both ~/mello and ~/moki exist — skipping directory move"
+  fi
+
+  local CODE_DIR="$HOME/moki"
+  [ -d "$CODE_DIR" ] || CODE_DIR="$HOME/mello"
+
+  # 4. Rename .mello-env → .moki-env
+  if [ -f "$CODE_DIR/.mello-env" ]; then
+    sed -e 's/^MELLO_USER=/MOKI_USER=/' \
+        -e 's/^MELLO_HOME=/MOKI_HOME=/' \
+        -e 's/^MELLO_UID=/MOKI_UID=/' \
+        "$CODE_DIR/.mello-env" > "$CODE_DIR/.moki-env"
+    rm -f "$CODE_DIR/.mello-env"
+    log "Migrated .mello-env → .moki-env"
+  fi
+
+  if [ -f "$CODE_DIR/.moki-env" ]; then
+    # shellcheck disable=SC1090
+    source "$CODE_DIR/.moki-env"
+  fi
+  MOKI_USER="${MOKI_USER:-$USER}"
+  MOKI_HOME="${MOKI_HOME:-$HOME}"
+  MOKI_UID="${MOKI_UID:-$(id -u)}"
+
+  # 5. Remove old systemd services, install new ones
+  sudo systemctl disable mello-native mello-librespot mello-touch-fix 2>/dev/null || true
+  sudo rm -f /etc/systemd/system/mello-native.service
+  sudo rm -f /etc/systemd/system/mello-librespot.service
+  sudo rm -f /etc/systemd/system/mello-touch-fix.service
+
+  for tmpl in "$CODE_DIR/pi/systemd/"*.service.template; do
+    [ -f "$tmpl" ] || continue
+    local name
+    name=$(basename "$tmpl" .template)
+    sed -e "s|__USER__|$MOKI_USER|g" \
+        -e "s|__HOME__|$MOKI_HOME|g" \
+        -e "s|__UID__|$MOKI_UID|g" \
+        "$tmpl" | sudo tee "/etc/systemd/system/$name" > /dev/null
+    log "Installed $name"
+  done
+
+  for f in "$CODE_DIR/pi/systemd/"*.service; do
+    [ -f "$f" ] || continue
+    sudo ln -sf "$f" "/etc/systemd/system/$(basename "$f")"
+  done
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable moki-librespot moki-native moki-touch-fix
+
+  # 6. Rename system group mello → moki
+  if getent group mello >/dev/null 2>&1; then
+    if ! getent group moki >/dev/null 2>&1; then
+      sudo groupmod -n moki mello
+      log "Renamed group mello → moki"
+    else
+      sudo usermod -aG moki "$MOKI_USER" 2>/dev/null || true
+    fi
+  fi
+
+  # 7. Update udev rules
+  if [ -f /etc/udev/rules.d/99-mello-drm.rules ]; then
+    sudo mv /etc/udev/rules.d/99-mello-drm.rules /etc/udev/rules.d/99-moki-drm.rules
+  fi
+  if [ -f /etc/udev/rules.d/99-mello-power.rules ]; then
+    sudo mv /etc/udev/rules.d/99-mello-power.rules /etc/udev/rules.d/99-moki-power.rules
+  fi
+  if [ -f /etc/udev/rules.d/99-backlight.rules ]; then
+    sudo sed -i 's/chgrp mello/chgrp moki/g' /etc/udev/rules.d/99-backlight.rules
+  fi
+  if [ -f /etc/udev/rules.d/99-moki-power.rules ]; then
+    sudo sed -i 's/chgrp mello/chgrp moki/g' /etc/udev/rules.d/99-moki-power.rules
+  fi
+  sudo udevadm control --reload-rules 2>/dev/null || true
+  sudo udevadm trigger 2>/dev/null || true
+
+  # 8. Update sudoers
+  local SUDOERS_NEW="/etc/sudoers.d/moki-wifi"
+  local TMP_SUDOERS="/tmp/moki-sudoers-021.$$"
+  echo "$MOKI_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /usr/sbin/iw, /bin/systemctl stop moki-librespot, /bin/systemctl start moki-librespot, /bin/systemctl restart moki-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth, /usr/bin/systemctl poweroff" > "$TMP_SUDOERS"
+  if sudo visudo -cf "$TMP_SUDOERS"; then
+    sudo install -m 440 "$TMP_SUDOERS" "$SUDOERS_NEW"
+    sudo rm -f /etc/sudoers.d/mello-wifi /etc/sudoers.d/tomo-wifi /etc/sudoers.d/berry-wifi
+    log "Sudoers migrated to moki-wifi"
+  else
+    log "ERROR: sudoers validation failed, skipping"
+  fi
+  rm -f "$TMP_SUDOERS"
+
+  # 9. Plymouth theme mello → moki
+  if [ -d "$CODE_DIR/pi/plymouth" ]; then
+    local THEME_DIR="/usr/share/plymouth/themes/moki"
+    sudo mkdir -p "$THEME_DIR"
+    sudo cp "$CODE_DIR/pi/plymouth/"* "$THEME_DIR/"
+    sudo plymouth-set-default-theme moki 2>/dev/null || true
+    sudo rm -rf /usr/share/plymouth/themes/mello
+    avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    if [ "${avail_kb:-0}" -lt 200000 ]; then
+      log "Low memory (${avail_kb}KB free), deferring update-initramfs"
+    elif ls /boot/initrd* &>/dev/null || ls /boot/firmware/initramfs* &>/dev/null; then
+      sudo update-initramfs -u 2>/dev/null || true
+    fi
+    log "Plymouth theme updated to moki"
+  fi
+
+  # 10. NetworkManager config (optional rename)
+  if [ -f /etc/NetworkManager/conf.d/99-mello-wifi-powersave.conf ] && [ ! -f /etc/NetworkManager/conf.d/99-moki-wifi-powersave.conf ]; then
+    sudo mv /etc/NetworkManager/conf.d/99-mello-wifi-powersave.conf /etc/NetworkManager/conf.d/99-moki-wifi-powersave.conf
+  fi
+
+  # 11. go-librespot device name
+  local CONFIG="$HOME/.config/go-librespot/config.yml"
+  if [ -f "$CONFIG" ]; then
+    sed -i 's/device_name:.*"Mello"/device_name: "Moki"/' "$CONFIG"
+    log "go-librespot device name updated to Moki"
+  fi
+
+  # 12. Portal UI
+  sudo cp "$CODE_DIR/portal/index.html" /usr/local/share/wifi-connect/ui/index.html 2>/dev/null || true
+
+  # 13. Rename service log if present
+  if [ -f "$CODE_DIR/mello.log" ] && [ ! -f "$CODE_DIR/moki.log" ]; then
+    mv "$CODE_DIR/mello.log" "$CODE_DIR/moki.log"
+  fi
+
+  # 14. Start new services
+  sudo systemctl start moki-librespot moki-native
+
+  log "Mello → Moki rebrand migration complete (reboot recommended for Plymouth)"
+}
+
+# ============================================
+# Migration 022: Finish Moki systemd + sudoers
+# (If 021 ran without full sudo access)
+# ============================================
+_migrate_022() {
+  local CODE_DIR="$HOME/moki"
+  [ -d "$CODE_DIR" ] || CODE_DIR="$HOME/mello"
+  [ -d "$CODE_DIR" ] || { log "No moki code dir, skipping"; return 0; }
+
+  if [ -f "$CODE_DIR/.moki-env" ]; then
+    # shellcheck disable=SC1090
+    source "$CODE_DIR/.moki-env"
+  fi
+  MOKI_USER="${MOKI_USER:-$USER}"
+  MOKI_HOME="${MOKI_HOME:-$HOME}"
+  MOKI_UID="${MOKI_UID:-$(id -u)}"
+
+  if [ ! -f /etc/systemd/system/moki-native.service ]; then
+    log "Installing moki systemd services"
+    for tmpl in "$CODE_DIR/pi/systemd/"*.service.template; do
+      [ -f "$tmpl" ] || continue
+      local name
+      name=$(basename "$tmpl" .template)
+      sed -e "s|__USER__|$MOKI_USER|g" \
+          -e "s|__HOME__|$MOKI_HOME|g" \
+          -e "s|__UID__|$MOKI_UID|g" \
+          "$tmpl" | sudo tee "/etc/systemd/system/$name" > /dev/null
+    done
+    for f in "$CODE_DIR/pi/systemd/"*.service; do
+      [ -f "$f" ] || continue
+      sudo ln -sf "$f" "/etc/systemd/system/$(basename "$f")"
+    done
+    sudo systemctl disable mello-native mello-librespot mello-touch-fix 2>/dev/null || true
+    sudo rm -f /etc/systemd/system/mello-native.service \
+              /etc/systemd/system/mello-librespot.service \
+              /etc/systemd/system/mello-touch-fix.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable moki-librespot moki-native moki-touch-fix
+    log "moki systemd services installed"
+  else
+    log "moki-native.service already present"
+  fi
+
+  if [ ! -f /etc/sudoers.d/moki-wifi ]; then
+    local TMP="/tmp/moki-sudoers-022.$$"
+    echo "$MOKI_USER ALL=(ALL) NOPASSWD: /usr/local/bin/wifi-connect, /usr/bin/nmcli, /usr/sbin/iw, /bin/systemctl stop moki-librespot, /bin/systemctl start moki-librespot, /bin/systemctl restart moki-native, /bin/systemctl restart bluetooth, /usr/bin/hciconfig hci0 up, /usr/sbin/hciconfig hci0 up, /usr/bin/hciconfig hci0 down, /usr/sbin/hciconfig hci0 down, /usr/sbin/rfkill unblock bluetooth, /usr/bin/systemctl poweroff" > "$TMP"
+    if sudo visudo -cf "$TMP"; then
+      sudo install -m 440 "$TMP" /etc/sudoers.d/moki-wifi
+      sudo rm -f /etc/sudoers.d/mello-wifi
+      log "sudoers migrated to moki-wifi"
+    else
+      log "ERROR: sudoers validation failed"
+      rm -f "$TMP"
+      return 1
+    fi
+    rm -f "$TMP"
+  fi
+
+  sudo systemctl start moki-librespot moki-native 2>/dev/null || true
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -889,3 +1110,5 @@ run_migration "017" "Disable WiFi power save"
 run_migration "018" "Allow WiFi sleep recovery"
 run_migration "019" "Prefer 2.4 GHz WiFi"
 run_migration "020" "Remove auto-update cron job"
+run_migration "021" "Mello to Moki rebrand"
+run_migration "022" "Finish Moki systemd and sudoers"

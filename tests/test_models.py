@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.models import LibrespotStatus, CatalogItem
+from moki.models import LibrespotStatus, CatalogItem
 
 
 class TestLibrespotStatus:

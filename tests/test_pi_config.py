@@ -8,9 +8,9 @@ ROOT = Path(__file__).parent.parent
 
 
 def test_librespot_service_is_not_part_of_ui_service():
-    service = (ROOT / 'pi/systemd/mello-librespot.service.template').read_text()
+    service = (ROOT / 'pi/systemd/moki-librespot.service.template').read_text()
 
-    assert 'PartOf=mello-native.service' not in service
+    assert 'PartOf=moki-native.service' not in service
 
 
 def test_migration_014_registered_for_librespot_dependency_update():

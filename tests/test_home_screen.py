@@ -19,10 +19,10 @@ pygame_stub.font = SimpleNamespace(Font=object)
 sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
-from mello.app import Mello
-from mello.models import AppScreen, MenuState, NowPlaying
-from mello.managers.setup_menu import SetupMenu
-from mello.config import (
+from moki.app import Moki
+from moki.models import AppScreen, MenuState, NowPlaying
+from moki.managers.setup_menu import SetupMenu
+from moki.config import (
     BTN_SIZE,
     CAROUSEL_CENTER_Y,
     COVER_SIZE,
@@ -59,7 +59,7 @@ def test_setup_menu_home_tap_opens_home():
 
 
 def test_open_home_screen_pauses_when_playing():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.SPOTIFY
     app._checkpod_launch_lock = False
     app._checkpod_play_in_progress = False
@@ -70,7 +70,7 @@ def test_open_home_screen_pauses_when_playing():
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
 
-    Mello._open_home_screen(app)
+    Moki._open_home_screen(app)
 
     app._pause_active_playback.assert_called_once_with('home_open')
     app._set_manual_pause_lock.assert_called_once_with('home_open')
@@ -79,7 +79,7 @@ def test_open_home_screen_pauses_when_playing():
 
 
 def test_open_home_screen_skips_pause_when_stopped():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.SPOTIFY
     app._checkpod_launch_lock = False
     app._checkpod_play_in_progress = False
@@ -89,14 +89,14 @@ def test_open_home_screen_skips_pause_when_stopped():
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
 
-    Mello._open_home_screen(app)
+    Moki._open_home_screen(app)
 
     app._pause_active_playback.assert_called_once_with('home_open')
     assert app.app_screen == AppScreen.HOME
 
 
 def test_home_musik_tap_returns_to_spotify():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._pressed_button = 'home_musik'
     app.renderer = SimpleNamespace(
         home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: p == (100, 100)),
@@ -110,7 +110,7 @@ def test_home_musik_tap_returns_to_spotify():
 
 
 def test_home_musik_tap_outside_icon_does_not_navigate():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._pressed_button = 'home_musik'
     app.renderer = SimpleNamespace(
         home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: False),
@@ -124,7 +124,7 @@ def test_home_musik_tap_outside_icon_does_not_navigate():
 
 
 def test_open_spotify_screen_sets_launch_lock():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.HOME
     app._spotify_launch_lock = False
     app._checkpod_launch_lock = False
@@ -136,7 +136,7 @@ def test_open_spotify_screen_sets_launch_lock():
     app.renderer = SimpleNamespace(invalidate=MagicMock())
     app._pressed_button = 'home_musik'
 
-    Mello._open_spotify_screen(app)
+    Moki._open_spotify_screen(app)
 
     assert app.app_screen == AppScreen.SPOTIFY
     assert app._spotify_launch_lock is True
@@ -145,7 +145,7 @@ def test_open_spotify_screen_sets_launch_lock():
 
 
 def test_toggle_play_clears_spotify_launch_lock():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.SPOTIFY
     app._spotify_launch_lock = True
     app.mock_mode = False
@@ -161,13 +161,13 @@ def test_toggle_play_clears_spotify_launch_lock():
     app._clear_manual_pause_lock = MagicMock()
     app._clear_spotify_launch_lock = MagicMock()
 
-    Mello._toggle_play(app)
+    Moki._toggle_play(app)
 
     app._clear_spotify_launch_lock.assert_called_once_with('play_tap')
 
 
 def test_home_touch_down_highlights_checker_icon():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(is_open=False)
     app.app_screen = AppScreen.HOME
     app.renderer = SimpleNamespace(
@@ -186,7 +186,7 @@ def test_home_touch_down_highlights_checker_icon():
 
 
 def test_home_touch_down_highlights_settings_icon():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(is_open=False)
     app.app_screen = AppScreen.HOME
     app.renderer = SimpleNamespace(
@@ -205,7 +205,7 @@ def test_home_touch_down_highlights_settings_icon():
 
 
 def test_home_settings_tap_opens_pin_entry():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app._pressed_button = 'home_settings'
     app.renderer = SimpleNamespace(
         home_settings_rect=types.SimpleNamespace(collidepoint=lambda p: p == (100, 100)),
@@ -219,19 +219,19 @@ def test_home_settings_tap_opens_pin_entry():
 
 
 def test_open_settings_with_pin_pauses_playback():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(open_with_pin=MagicMock())
     app.renderer = SimpleNamespace(invalidate=MagicMock())
     app._pause_active_playback = MagicMock()
 
-    Mello._open_settings_with_pin(app)
+    Moki._open_settings_with_pin(app)
 
     app._pause_active_playback.assert_called_once_with('settings_open')
     app.setup_menu.open_with_pin.assert_called_once()
 
 
 def test_home_touch_down_highlights_musik_icon():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(is_open=False)
     app.app_screen = AppScreen.HOME
     app.renderer = SimpleNamespace(
@@ -249,7 +249,7 @@ def test_home_touch_down_highlights_musik_icon():
 
 
 def test_player_home_button_opens_home_screen():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.SPOTIFY
     app._last_action_time = 0
     app._pressed_button = None
@@ -264,7 +264,7 @@ def test_player_home_button_opens_home_screen():
         - COVER_SIZE_SMALL // 2
         + BTN_SIZE // 2
     )
-    Mello._handle_button_tap(app, (CONTROLS_X, home_y))
+    Moki._handle_button_tap(app, (CONTROLS_X, home_y))
 
     app._open_home_screen.assert_called_once()
     assert app._pressed_button == 'home'

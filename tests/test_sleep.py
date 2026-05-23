@@ -8,8 +8,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.handlers.evdev_touch import EvdevTouchHandler
-from mello.managers.sleep import SleepManager
+from moki.handlers.evdev_touch import EvdevTouchHandler
+from moki.managers.sleep import SleepManager
 
 
 def make_sleep_manager(monkeypatch):
@@ -25,7 +25,7 @@ def test_sleep_allowed_when_enabled(monkeypatch):
     mgr = make_sleep_manager(monkeypatch)
     mgr.last_activity = 100
 
-    with patch('mello.managers.sleep.time.time', return_value=100 + 121):
+    with patch('moki.managers.sleep.time.time', return_value=100 + 121):
         assert mgr.check_sleep(is_playing=False) is True
 
     assert mgr.is_sleeping is True
@@ -51,7 +51,7 @@ def test_sleep_blocked_when_disabled(monkeypatch):
     mgr.last_activity = 100
     mgr.disable_sleep('touch wake unavailable')
 
-    with patch('mello.managers.sleep.time.time', return_value=100 + 121):
+    with patch('moki.managers.sleep.time.time', return_value=100 + 121):
         assert mgr.check_sleep(is_playing=False) is False
 
     assert mgr.is_sleeping is False

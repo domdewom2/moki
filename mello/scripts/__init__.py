@@ -1,2 +1,0 @@
-# Mello utility scripts
-

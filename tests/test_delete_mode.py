@@ -16,8 +16,8 @@ pygame_stub.font = SimpleNamespace(Font=object)
 sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
-from mello.app import Mello
-from mello.models import CatalogItem, AppScreen
+from moki.app import Moki
+from moki.models import CatalogItem, AppScreen
 
 
 def _item(item_id='1') -> CatalogItem:
@@ -29,9 +29,9 @@ def _item(item_id='1') -> CatalogItem:
     )
 
 
-def _make_app(rect=(10, 10, 50, 50)) -> Mello:
+def _make_app(rect=(10, 10, 50, 50)) -> Moki:
     item = _item()
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.catalog_manager = SimpleNamespace(items=[item])
     app.temp_item = None
     app.selected_index = 0

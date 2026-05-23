@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.models import MenuState
-from mello.managers.setup_menu import SetupMenu
+from moki.models import MenuState
+from moki.managers.setup_menu import SetupMenu
 
 
 def _make_menu(on_prepare_shutdown=None):
@@ -43,7 +43,7 @@ def test_shutdown_confirmed_powers_off():
     menu._shutdown_confirm_pending = True
     rect = SimpleNamespace(collidepoint=lambda x, y: True)
 
-    with patch('mello.managers.setup_menu.subprocess.run') as run_mock:
+    with patch('moki.managers.setup_menu.subprocess.run') as run_mock:
         menu.handle_tap((10, 10), {'shutdown': rect})
 
     on_prepare.assert_called_once()

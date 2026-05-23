@@ -1,5 +1,5 @@
 """
-Tests for VolumeController - always Mello mode (ALSA-controlled).
+Tests for VolumeController - always Moki mode (ALSA-controlled).
 """
 import pytest
 from pathlib import Path
@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, patch
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.controllers.volume import VolumeController
-from mello.utils import set_system_volume
-from mello.config import DEFAULT_VOLUME_LEVELS
+from moki.controllers.volume import VolumeController
+from moki.utils import set_system_volume
+from moki.config import DEFAULT_VOLUME_LEVELS
 
 
 class FakeSettings:
@@ -72,8 +72,8 @@ class TestVolumeInit:
         assert vc.speaker_level == DEFAULT_VOLUME_LEVELS[1]['speaker']
         assert vc.bt_level == DEFAULT_VOLUME_LEVELS[1]['bt']
 
-    @patch('mello.controllers.volume.set_system_volume')
-    @patch('mello.controllers.volume.unmute_speakers')
+    @patch('moki.controllers.volume.set_system_volume')
+    @patch('moki.controllers.volume.unmute_speakers')
     def test_init_sets_system_volume(self, mock_unmute, mock_set_vol):
         vc = _make_controller()
         vc.init()
@@ -84,23 +84,23 @@ class TestVolumeInit:
 class TestVolumeToggle:
     """Tests for cycling volume levels."""
 
-    @patch('mello.controllers.volume.set_system_volume')
-    @patch('mello.controllers.volume.run_async')
+    @patch('moki.controllers.volume.set_system_volume')
+    @patch('moki.controllers.volume.run_async')
     def test_toggle_cycles_through_levels(self, mock_run_async, mock_set_vol):
         vc = _make_controller()
         initial = vc.index
         vc.toggle()
         assert vc.index == (initial + 1) % len(DEFAULT_VOLUME_LEVELS)
 
-    @patch('mello.controllers.volume.set_system_volume')
-    @patch('mello.controllers.volume.run_async')
+    @patch('moki.controllers.volume.set_system_volume')
+    @patch('moki.controllers.volume.run_async')
     def test_toggle_wraps_around(self, mock_run_async, mock_set_vol):
         vc = _make_controller()
         for _ in range(len(DEFAULT_VOLUME_LEVELS)):
             vc.toggle()
         assert vc.index == 1  # Back to start
 
-    @patch('mello.controllers.volume.run_async')
+    @patch('moki.controllers.volume.run_async')
     def test_toggle_calls_set_system_volume(self, mock_run_async):
         vc = _make_controller()
         vc.toggle()

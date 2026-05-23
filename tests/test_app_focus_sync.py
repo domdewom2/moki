@@ -1,5 +1,5 @@
 """
-Tests for Mello remote Spotify focus sync behavior.
+Tests for Moki remote Spotify focus sync behavior.
 """
 import time
 import threading
@@ -18,18 +18,18 @@ pygame_stub.font = SimpleNamespace(Font=object)
 sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
-from mello.app import Mello
-from mello.config import CONTEXT_SWITCH_WATCHDOG_TIMEOUT
-from mello.models import CatalogItem, NowPlaying
+from moki.app import Moki
+from moki.config import CONTEXT_SWITCH_WATCHDOG_TIMEOUT
+from moki.models import CatalogItem, NowPlaying
 
 
 def _item(item_id: str, uri: str, name: str) -> CatalogItem:
     return CatalogItem(id=item_id, uri=uri, name=name, type='album')
 
 
-def _make_mello(items: list[CatalogItem], now_playing: NowPlaying) -> Mello:
-    """Build a lightweight Mello instance for unit-level sync tests."""
-    app = Mello.__new__(Mello)
+def _make_moki(items: list[CatalogItem], now_playing: NowPlaying) -> Moki:
+    """Build a lightweight Moki instance for unit-level sync tests."""
+    app = Moki.__new__(Moki)
     app.catalog_manager = SimpleNamespace(items=items)
     app.temp_item = None
     app.selected_index = 0
@@ -82,7 +82,7 @@ class TestRemoteFocusSync:
             _item('1', 'spotify:album:a', 'A'),
             _item('2', 'spotify:album:b', 'B'),
         ]
-        app = _make_mello(items, NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki(items, NowPlaying(playing=True, context_uri='spotify:album:b'))
 
         app._sync_to_playing()
 
@@ -97,12 +97,12 @@ class TestRepeatContextSync:
     """Remote Spotify playback should also get repeat-context protection."""
 
     def test_external_album_playback_enables_repeat_context(self):
-        app = _make_mello(
+        app = _make_moki(
             [_item('1', 'spotify:album:a', 'A')],
             NowPlaying(playing=True, context_uri='spotify:album:a', repeat_context=False),
         )
 
-        with patch('mello.app.run_async') as mock_run:
+        with patch('moki.app.run_async') as mock_run:
             mock_run.side_effect = lambda fn, *a: fn(*a)
             app._ensure_repeat_context_for_current_status()
 
@@ -110,7 +110,7 @@ class TestRepeatContextSync:
         assert app._repeat_context_uri == 'spotify:album:a'
 
     def test_external_album_repeat_true_does_not_call_api(self):
-        app = _make_mello(
+        app = _make_moki(
             [_item('1', 'spotify:album:a', 'A')],
             NowPlaying(playing=True, context_uri='spotify:album:a', repeat_context=True),
         )
@@ -121,7 +121,7 @@ class TestRepeatContextSync:
         assert app._repeat_context_uri == 'spotify:album:a'
 
     def test_external_track_playback_does_not_enable_repeat_context(self):
-        app = _make_mello(
+        app = _make_moki(
             [_item('1', 'spotify:track:a', 'A')],
             NowPlaying(playing=True, context_uri='spotify:track:a', repeat_context=False),
         )
@@ -135,7 +135,7 @@ class TestRepeatContextSync:
             _item('1', 'spotify:album:a', 'A'),
             _item('2', 'spotify:album:b', 'B'),
         ]
-        app = _make_mello(items, NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki(items, NowPlaying(playing=True, context_uri='spotify:album:b'))
         app._user_driving = True
 
         app._sync_to_playing()
@@ -149,7 +149,7 @@ class TestRepeatContextSync:
             _item('1', 'spotify:album:a', 'A'),
             _item('2', 'spotify:album:b', 'B'),
         ]
-        app = _make_mello(items, NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki(items, NowPlaying(playing=True, context_uri='spotify:album:b'))
         app._user_driving = True
 
         app._sync_to_playing()
@@ -166,7 +166,7 @@ class TestRepeatContextSync:
             _item('1', 'spotify:album:a', 'A'),
             _item('2', 'spotify:album:b', 'B'),
         ]
-        app = _make_mello(items, NowPlaying(playing=False, paused=True, context_uri='spotify:album:b'))
+        app = _make_moki(items, NowPlaying(playing=False, paused=True, context_uri='spotify:album:b'))
 
         app._sync_to_playing()
 
@@ -176,7 +176,7 @@ class TestRepeatContextSync:
 
     def test_sync_keeps_pending_when_context_not_in_display_items(self):
         items = [_item('1', 'spotify:album:a', 'A')]
-        app = _make_mello(items, NowPlaying(playing=True, context_uri='spotify:album:external'))
+        app = _make_moki(items, NowPlaying(playing=True, context_uri='spotify:album:external'))
 
         app._sync_to_playing()
 
@@ -186,7 +186,7 @@ class TestRepeatContextSync:
 
     def test_sync_does_not_unmute_when_pause_intent_is_active(self):
         items = [_item('1', 'spotify:album:a', 'A')]
-        app = _make_mello(items, NowPlaying(playing=True, context_uri='spotify:album:a'))
+        app = _make_moki(items, NowPlaying(playing=True, context_uri='spotify:album:a'))
         app.playback.pause_intent_active = True
 
         app._sync_to_playing()
@@ -195,7 +195,7 @@ class TestRepeatContextSync:
 
     def test_sync_does_not_unmute_when_manual_pause_lock_is_active(self):
         items = [_item('1', 'spotify:album:a', 'A')]
-        app = _make_mello(items, NowPlaying(playing=True, context_uri='spotify:album:a'))
+        app = _make_moki(items, NowPlaying(playing=True, context_uri='spotify:album:a'))
         app._manual_pause_lock = True
 
         app._sync_to_playing()
@@ -208,20 +208,20 @@ class TestRemoteFocusPriority:
 
     def test_prioritizes_remote_focus_on_mismatch_without_user_intent(self):
         focused = _item('1', 'spotify:album:a', 'A')
-        app = _make_mello([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
 
         assert app._should_prioritize_remote_focus(focused) is True
 
     def test_does_not_prioritize_remote_focus_while_user_driving(self):
         focused = _item('1', 'spotify:album:a', 'A')
-        app = _make_mello([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
         app._user_driving = True
 
         assert app._should_prioritize_remote_focus(focused) is False
 
     def test_does_not_prioritize_remote_focus_when_context_matches(self):
         focused = _item('1', 'spotify:album:a', 'A')
-        app = _make_mello([focused], NowPlaying(playing=True, context_uri='spotify:album:a'))
+        app = _make_moki([focused], NowPlaying(playing=True, context_uri='spotify:album:a'))
 
         assert app._should_prioritize_remote_focus(focused) is False
 
@@ -231,7 +231,7 @@ class TestContextSwitchWatchdog:
 
     def test_watchdog_does_not_trigger_before_timeout(self):
         focused = _item('1', 'spotify:album:a', 'A')
-        app = _make_mello([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
         app._requested_focus_epoch = app._focus_epoch
         app._requested_focus_uri = focused.uri
         app._requested_focus_since = time.time() - 30.0
@@ -245,7 +245,7 @@ class TestContextSwitchWatchdog:
 
     def test_watchdog_triggers_hard_fail_safe_after_timeout(self):
         focused = _item('1', 'spotify:album:a', 'A')
-        app = _make_mello([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
+        app = _make_moki([focused], NowPlaying(playing=True, context_uri='spotify:album:b'))
         app._pending_focus_uri = focused.uri
         app._requested_focus_epoch = app._focus_epoch
         app._requested_focus_uri = focused.uri
@@ -254,7 +254,7 @@ class TestContextSwitchWatchdog:
         app._user_driving = True
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr('mello.app.run_async', lambda fn, *a: fn(*a))
+            mp.setattr('moki.app.run_async', lambda fn, *a: fn(*a))
             app._check_context_switch_watchdog(focused)
 
         app.playback.stop_all.assert_called_once()
@@ -270,7 +270,7 @@ class TestContextSwitchWatchdog:
 
     def test_watchdog_resets_timer_when_stall_condition_clears(self):
         focused = _item('1', 'spotify:album:a', 'A')
-        app = _make_mello([focused], NowPlaying(playing=False, paused=True, context_uri='spotify:album:a'))
+        app = _make_moki([focused], NowPlaying(playing=False, paused=True, context_uri='spotify:album:a'))
         app._context_switch_stall_since = time.time() - 10.0
         app._pending_focus_uri = None
         app._requested_focus_uri = None
@@ -287,7 +287,7 @@ class TestPausedSameFocusContext:
     def test_true_when_paused_and_uri_matches(self):
         uri = 'spotify:album:a'
         items = [_item('1', uri, 'A')]
-        app = _make_mello(
+        app = _make_moki(
             items,
             NowPlaying(playing=False, paused=True, stopped=False, context_uri=uri),
         )
@@ -296,7 +296,7 @@ class TestPausedSameFocusContext:
     def test_false_when_playing(self):
         uri = 'spotify:album:a'
         items = [_item('1', uri, 'A')]
-        app = _make_mello(
+        app = _make_moki(
             items,
             NowPlaying(playing=True, paused=False, context_uri=uri),
         )
@@ -304,7 +304,7 @@ class TestPausedSameFocusContext:
 
     def test_false_when_different_context(self):
         items = [_item('1', 'spotify:album:a', 'A')]
-        app = _make_mello(
+        app = _make_moki(
             items,
             NowPlaying(playing=False, paused=True, stopped=False, context_uri='spotify:album:b'),
         )

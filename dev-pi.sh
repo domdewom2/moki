@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Mello Pi Development Script
+# Moki Pi Development Script
 # Syncs files and runs the Pygame app on the Pi via systemd
 
 set -e
 
 PI_HOST=""
-PI_DIR="~/mello"
+PI_DIR="~/moki"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Colors
@@ -37,7 +37,7 @@ while [[ "$#" -gt 0 ]]; do
             echo "Usage: ./dev-pi.sh --host user@host [-v|--verbose] [-p|--profile] [-T|--skip-tests]"
             echo ""
             echo "Options:"
-            echo "  --host USER@HOST  SSH target (required, e.g. --host pi@mello.local)"
+            echo "  --host USER@HOST  SSH target (required, e.g. --host pi@moki.local)"
             echo "  -v, --verbose     Show all logs (INFO + DEBUG)"
             echo "  -p, --profile     Enable frame profiler (shows render timing)"
             echo "  -T, --skip-tests  Skip running tests before sync"
@@ -58,11 +58,11 @@ done
 if [ -z "$PI_HOST" ]; then
     echo -e "${RED}Error: --host is required${NC}"
     echo "Usage: ./dev-pi.sh --host user@host"
-    echo "Example: ./dev-pi.sh --host pi@mello.local"
+    echo "Example: ./dev-pi.sh --host pi@moki.local"
     exit 1
 fi
 
-echo -e "${GREEN}Mello Pi Development${NC}"
+echo -e "${GREEN}Moki Pi Development${NC}"
 echo "========================"
 echo ""
 
@@ -84,8 +84,8 @@ cleanup() {
     # Kill log tail
     kill $LOG_PID 2>/dev/null || true
 
-    # Stop Mello service gracefully (SIGTERM -> graceful shutdown)
-    ssh -o ConnectTimeout=3 $PI_HOST "sudo systemctl stop mello-native" 2>/dev/null || true
+    # Stop Moki service gracefully (SIGTERM -> graceful shutdown)
+    ssh -o ConnectTimeout=3 $PI_HOST "sudo systemctl stop moki-native" 2>/dev/null || true
 
     echo -e "${GREEN}Stopped${NC}"
     exit 0
@@ -122,14 +122,14 @@ run_tests() {
     pip install -q pytest 2>/dev/null
 
     # Run tests
-    if python3 -m pytest "$LOCAL_DIR/tests/" -v --tb=short > /tmp/mello_tests.log 2>&1; then
-        tail -20 /tmp/mello_tests.log
-        local passed=$(grep -E "passed|PASSED" /tmp/mello_tests.log | tail -1)
+    if python3 -m pytest "$LOCAL_DIR/tests/" -v --tb=short > /tmp/moki_tests.log 2>&1; then
+        tail -20 /tmp/moki_tests.log
+        local passed=$(grep -E "passed|PASSED" /tmp/moki_tests.log | tail -1)
         echo -e "${GREEN}Tests passed${NC} ${DIM}$passed${NC}"
         deactivate 2>/dev/null || true
         return 0
     else
-        tail -20 /tmp/mello_tests.log
+        tail -20 /tmp/moki_tests.log
         echo -e "${RED}Tests failed${NC}"
         echo -e "${YELLOW}Fix tests before syncing, or use -T to skip${NC}"
         deactivate 2>/dev/null || true
@@ -163,23 +163,23 @@ sync_files() {
     echo -e "${GREEN}Synced${NC}"
 }
 
-# Restart the Mello app via systemd
+# Restart the Moki app via systemd
 restart_app() {
     echo -e "${BLUE}Restarting...${NC}"
 
     # Reload systemd config in case service file changed, then restart
-    ssh $PI_HOST "sudo systemctl daemon-reload && sudo systemctl restart mello-native" 2>/dev/null
+    ssh $PI_HOST "sudo systemctl daemon-reload && sudo systemctl restart moki-native" 2>/dev/null
 
     # Wait for service to start
     sleep 1
 
     # Check status
-    if ssh $PI_HOST "systemctl is-active --quiet mello-native" 2>/dev/null; then
+    if ssh $PI_HOST "systemctl is-active --quiet moki-native" 2>/dev/null; then
         echo -e "${GREEN}Running${NC}"
     else
         echo -e "${RED}Failed to start${NC}"
-        ssh $PI_HOST "sudo journalctl -u mello-native -n 10 --no-pager" 2>/dev/null || true
-        ssh $PI_HOST "tail -10 ~/mello/mello.log" 2>/dev/null || true
+        ssh $PI_HOST "sudo journalctl -u moki-native -n 10 --no-pager" 2>/dev/null || true
+        ssh $PI_HOST "tail -10 ~/moki/moki.log" 2>/dev/null || true
     fi
 }
 
@@ -188,7 +188,7 @@ start_logs() {
     kill $LOG_PID 2>/dev/null || true
     sleep 0.2
 
-    ssh $PI_HOST 'tail -f ~/mello/mello.log 2>/dev/null' 2>/dev/null | while IFS= read -r line; do
+    ssh $PI_HOST 'tail -f ~/moki/moki.log 2>/dev/null' 2>/dev/null | while IFS= read -r line; do
         if [ "$VERBOSE" = true ]; then
             # Verbose mode: show everything, just add colors
             case "$line" in
@@ -252,28 +252,28 @@ sync_files
 echo ""
 
 # Start/setup services on Pi
-echo -e "${BLUE}Starting Mello...${NC}"
+echo -e "${BLUE}Starting Moki...${NC}"
 
 # Create systemd override for profile mode
 if [ "$PROFILE" = true ]; then
-    ssh $PI_HOST "sudo mkdir -p /etc/systemd/system/mello-native.service.d && echo -e '[Service]\nEnvironment=MELLO_PROFILE=1' | sudo tee /etc/systemd/system/mello-native.service.d/profile.conf > /dev/null"
+    ssh $PI_HOST "sudo mkdir -p /etc/systemd/system/moki-native.service.d && echo -e '[Service]\nEnvironment=MOKI_PROFILE=1' | sudo tee /etc/systemd/system/moki-native.service.d/profile.conf > /dev/null"
 else
-    ssh $PI_HOST "sudo rm -f /etc/systemd/system/mello-native.service.d/profile.conf 2>/dev/null; true"
+    ssh $PI_HOST "sudo rm -f /etc/systemd/system/moki-native.service.d/profile.conf 2>/dev/null; true"
 fi
 
 ssh -t $PI_HOST << 'ENDSSH'
 # Ensure systemd services are linked
-sudo ln -sf ~/mello/pi/systemd/mello-*.service /etc/systemd/system/ 2>/dev/null
+sudo ln -sf ~/moki/pi/systemd/moki-*.service /etc/systemd/system/ 2>/dev/null
 sudo systemctl daemon-reload
 
 # Stop any orphan processes first
-pkill -9 -f "mello.py" 2>/dev/null || true
+pkill -9 -f "moki.py" 2>/dev/null || true
 pkill -9 -f "go-librespot" 2>/dev/null || true
 sleep 0.5
 
 # Start librespot if not running
-if ! systemctl is-active --quiet mello-librespot; then
-    sudo systemctl start mello-librespot
+if ! systemctl is-active --quiet moki-librespot; then
+    sudo systemctl start moki-librespot
     sleep 2
 fi
 
@@ -281,32 +281,32 @@ if pgrep -f "go-librespot" > /dev/null; then
     echo "go-librespot running"
 else
     echo "go-librespot failed"
-    journalctl -u mello-librespot -n 3 --no-pager
+    journalctl -u moki-librespot -n 3 --no-pager
 fi
 
 # Setup Python environment
-cd ~/mello
+cd ~/moki
 [ ! -d "venv" ] && python3 -m venv venv
 source venv/bin/activate
 pip install -q -r requirements.txt 2>/dev/null
 
 mkdir -p data/images
 
-# Start Mello via systemd
-sudo systemctl restart mello-native
+# Start Moki via systemd
+sudo systemctl restart moki-native
 sleep 1
 
-if systemctl is-active --quiet mello-native; then
-    echo "Mello running"
+if systemctl is-active --quiet moki-native; then
+    echo "Moki running"
 else
-    echo "Mello failed"
-    sudo journalctl -u mello-native -n 5 --no-pager
-    cat ~/mello/mello.log 2>/dev/null || true
+    echo "Moki failed"
+    sudo journalctl -u moki-native -n 5 --no-pager
+    cat ~/moki/moki.log 2>/dev/null || true
 fi
 ENDSSH
 
 echo ""
-echo -e "${GREEN}Mello running on Pi${NC}"
+echo -e "${GREEN}Moki running on Pi${NC}"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "  ${GREEN}r${NC}/Enter  Sync + Restart"
@@ -344,7 +344,7 @@ while true; do
             l)
                 echo ""
                 echo -e "${CYAN}━━━ Recent logs ━━━${NC}"
-                ssh $PI_HOST 'tail -20 ~/mello/mello.log' 2>/dev/null
+                ssh $PI_HOST 'tail -20 ~/moki/moki.log' 2>/dev/null
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━${NC}"
                 echo ""
                 ;;

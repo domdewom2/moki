@@ -1,5 +1,5 @@
 """
-Pytest configuration and shared fixtures for Mello tests.
+Pytest configuration and shared fixtures for Moki tests.
 """
 import json
 import pytest

@@ -20,10 +20,10 @@ logs/
 !.env.example
 
 # Install environment (per-device)
-.mello-env
+.moki-env
 
 # Update/runtime artifacts
-mello-update.log
+moki-update.log
 .pytest_cache/
 
 # IDE

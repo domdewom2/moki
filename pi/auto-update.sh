@@ -9,8 +9,10 @@
 main() {
 set -euo pipefail
 
-# Support transitional directory names (berry → tomo → mello)
-if [ -d ~/mello ]; then
+# Support transitional directory names (berry → tomo → mello → moki)
+if [ -d ~/moki ]; then
+  cd ~/moki
+elif [ -d ~/mello ]; then
   cd ~/mello
 elif [ -d ~/tomo ]; then
   cd ~/tomo
@@ -22,22 +24,27 @@ fi
 
 # Load install environment (username, home, uid)
 # Support all transitional env file names
-if [ -f ~/mello/.mello-env ]; then
+if [ -f ~/moki/.moki-env ]; then
+  source ~/moki/.moki-env
+elif [ -f ~/mello/.mello-env ]; then
   source ~/mello/.mello-env
+  MOKI_USER="${MELLO_USER:-$USER}"
+  MOKI_HOME="${MELLO_HOME:-$HOME}"
+  MOKI_UID="${MELLO_UID:-$(id -u)}"
 elif [ -f ~/tomo/.tomo-env ]; then
   source ~/tomo/.tomo-env
-  MELLO_USER="${TOMO_USER:-$USER}"
-  MELLO_HOME="${TOMO_HOME:-$HOME}"
-  MELLO_UID="${TOMO_UID:-$(id -u)}"
+  MOKI_USER="${TOMO_USER:-$USER}"
+  MOKI_HOME="${TOMO_HOME:-$HOME}"
+  MOKI_UID="${TOMO_UID:-$(id -u)}"
 elif [ -f ~/berry/.berry-env ]; then
   source ~/berry/.berry-env
-  MELLO_USER="${BERRY_USER:-$USER}"
-  MELLO_HOME="${BERRY_HOME:-$HOME}"
-  MELLO_UID="${BERRY_UID:-$(id -u)}"
+  MOKI_USER="${BERRY_USER:-$USER}"
+  MOKI_HOME="${BERRY_HOME:-$HOME}"
+  MOKI_UID="${BERRY_UID:-$(id -u)}"
 else
-  MELLO_USER="$USER"
-  MELLO_HOME="$HOME"
-  MELLO_UID="$(id -u)"
+  MOKI_USER="$USER"
+  MOKI_HOME="$HOME"
+  MOKI_UID="$(id -u)"
 fi
 
 log() {
@@ -45,7 +52,7 @@ log() {
 }
 
 # Avoid overlapping updates from manual invocations.
-LOCK_FILE="/tmp/mello-auto-update.lock"
+LOCK_FILE="/tmp/moki-auto-update.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   log "Skip: lock file present ($LOCK_FILE)"
@@ -79,14 +86,14 @@ _ensure_git_repo() {
   current="$(basename "$(pwd)")"
 
   # Backup user data
-  local data_backup="/tmp/mello-reclone-data.$$"
+  local data_backup="/tmp/moki-reclone-data.$$"
   if [ -d data ] && [ "$(ls -A data/ 2>/dev/null)" ]; then
     cp -a data "$data_backup"
   fi
 
   # Backup env file (support transitional names)
-  local env_backup="/tmp/mello-reclone-env.$$"
-  for env_file in .mello-env .tomo-env .berry-env; do
+  local env_backup="/tmp/moki-reclone-env.$$"
+  for env_file in .moki-env .tomo-env .berry-env; do
     if [ -f "$env_file" ]; then
       cp "$env_file" "$env_backup"
       break
@@ -94,13 +101,13 @@ _ensure_git_repo() {
   done
 
   # Backup .env (POSTHOG_API_KEY and any other user secrets)
-  local dotenv_backup="/tmp/mello-reclone-dotenv.$$"
+  local dotenv_backup="/tmp/moki-reclone-dotenv.$$"
   if [ -f .env ]; then
     cp .env "$dotenv_backup"
   fi
 
   # Re-clone into a temp dir, then swap
-  local tmp_clone="/tmp/mello-reclone-repo.$$"
+  local tmp_clone="/tmp/moki-reclone-repo.$$"
   if ! git clone --depth 1 "$REPO_URL" "$tmp_clone" 2>/dev/null; then
     log "Re-clone failed (network issue?), will retry next run"
     rm -rf "$tmp_clone" "$data_backup" "$env_backup" "$dotenv_backup"
@@ -109,10 +116,10 @@ _ensure_git_repo() {
 
   # Swap: move broken dir out, move clone in
   cd "$parent"
-  mv "$current" "/tmp/mello-broken-backup.$$"
+  mv "$current" "/tmp/moki-broken-backup.$$"
   if ! mv "$tmp_clone" "$current"; then
     log "Swap failed — restoring original directory"
-    mv "/tmp/mello-broken-backup.$$" "$current"
+    mv "/tmp/moki-broken-backup.$$" "$current"
     rm -rf "$tmp_clone" "$data_backup" "$env_backup" "$dotenv_backup"
     exit 1
   fi
@@ -128,7 +135,7 @@ _ensure_git_repo() {
     rm -rf "$data_backup"
   fi
   if [ -f "$env_backup" ]; then
-    cp "$env_backup" .mello-env
+    cp "$env_backup" .moki-env
     rm -f "$env_backup"
   fi
   if [ -f "$dotenv_backup" ]; then
@@ -146,7 +153,7 @@ _ensure_git_repo() {
   deactivate
 
   # Clean up broken backup (keep for a bit in case of issues)
-  rm -rf "/tmp/mello-broken-backup.$$"
+  rm -rf "/tmp/moki-broken-backup.$$"
 
   log "Re-clone complete, repo is healthy"
 }
@@ -168,13 +175,17 @@ fi
 
 log "Updates found, applying (local=$LOCAL remote=$REMOTE)"
 
+# Stop app services before pull/migrate to free RAM on memory-limited Pis
+sudo systemctl stop mello-native moki-native mello-librespot moki-librespot 2>/dev/null || true
+sleep 1
+
 # Remember current code directory (may be ~/tomo or ~/berry during transition)
 CODE_DIR="$(pwd)"
 
 # Backup user data that may still be tracked by git (e.g. data/catalog.json
 # was committed early on but later gitignored; git rm --cached will cause
 # git pull to delete it from disk).
-DATA_BACKUP="/tmp/mello-data-backup.$$"
+DATA_BACKUP="/tmp/moki-data-backup.$$"
 if [ -d data ] && [ "$(ls -A data/ 2>/dev/null)" ]; then
   cp -a data "$DATA_BACKUP"
 fi
@@ -202,7 +213,7 @@ fi
 # ============================================
 # 2. Run migration script BEFORE service restart
 #    (may install packages, change configs, update sudoers)
-#    Migration may move $CODE_DIR (e.g. ~/tomo → ~/mello)
+#    Migration may move $CODE_DIR (e.g. ~/tomo → ~/moki)
 # ============================================
 if [ -f "$CODE_DIR/pi/migrate.sh" ]; then
   log "Running migration script"
@@ -211,32 +222,37 @@ if [ -f "$CODE_DIR/pi/migrate.sh" ]; then
   fi
 fi
 
-# After migration, code may have moved to ~/mello
-if [ -d ~/mello ]; then
-  CODE_DIR=~/mello
+# After migration, code may have moved to ~/moki
+if [ -d ~/moki ]; then
+  CODE_DIR=~/moki
   cd "$CODE_DIR"
 fi
 
 # Reload env after migration (may have been renamed)
-if [ -f "$CODE_DIR/.mello-env" ]; then
-  source "$CODE_DIR/.mello-env"
+if [ -f "$CODE_DIR/.moki-env" ]; then
+  source "$CODE_DIR/.moki-env"
 fi
 
 # ============================================
 # 3. Sync Plymouth boot splash theme (if installed)
 # ============================================
-if [ -d /usr/share/plymouth/themes/mello ]; then
+if [ -d /usr/share/plymouth/themes/moki ]; then
   PLYMOUTH_CHANGED=false
-  for f in moki-boot.png mello.script mello.plymouth; do
-    if ! diff -q "$CODE_DIR/pi/plymouth/$f" "/usr/share/plymouth/themes/mello/$f" &>/dev/null; then
+  for f in moki-boot.png moki.script moki.plymouth; do
+    if ! diff -q "$CODE_DIR/pi/plymouth/$f" "/usr/share/plymouth/themes/moki/$f" &>/dev/null; then
       PLYMOUTH_CHANGED=true
       break
     fi
   done
   if [ "$PLYMOUTH_CHANGED" = true ]; then
     log "Updating Plymouth boot splash theme"
-    sudo cp "$CODE_DIR/pi/plymouth/"* /usr/share/plymouth/themes/mello/
-    sudo update-initramfs -u
+    sudo cp "$CODE_DIR/pi/plymouth/"* /usr/share/plymouth/themes/moki/
+    avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    if [ "${avail_kb:-0}" -lt 200000 ]; then
+      log "Low memory (${avail_kb}KB free), deferring update-initramfs"
+    else
+      sudo update-initramfs -u
+    fi
   fi
 fi
 
@@ -249,9 +265,9 @@ log "Updating systemd services"
 for tmpl in "$CODE_DIR/pi/systemd/"*.service.template; do
   [ -f "$tmpl" ] || continue
   name=$(basename "$tmpl" .template)
-  sed -e "s|__USER__|$MELLO_USER|g" \
-      -e "s|__HOME__|$MELLO_HOME|g" \
-      -e "s|__UID__|$MELLO_UID|g" \
+  sed -e "s|__USER__|$MOKI_USER|g" \
+      -e "s|__HOME__|$MOKI_HOME|g" \
+      -e "s|__UID__|$MOKI_UID|g" \
       "$tmpl" | sudo tee "/etc/systemd/system/$name" > /dev/null
 done
 # Symlink non-templated services
@@ -265,11 +281,11 @@ sudo systemctl daemon-reload
 # 5. Restart services
 # ============================================
 log "Restarting services"
-sudo systemctl restart mello-librespot mello-native
+sudo systemctl restart moki-librespot moki-native
 
 # Basic post-update health check to catch hard failures quickly.
 sleep 2
-if ! systemctl is-active --quiet mello-librespot || ! systemctl is-active --quiet mello-native; then
+if ! systemctl is-active --quiet moki-librespot || ! systemctl is-active --quiet moki-native; then
   log "ERROR: service health check failed after restart"
   exit 1
 fi

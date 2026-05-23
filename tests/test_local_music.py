@@ -19,9 +19,9 @@ pygame_stub.font = SimpleNamespace(Font=object)
 sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
-from mello.app import Mello
-from mello.models import AppScreen, CatalogItem, NowPlaying
-from mello.managers.local_music_manager import LocalMusicManager, _uri_for_relative_path
+from moki.app import Moki
+from moki.models import AppScreen, CatalogItem, NowPlaying
+from moki.managers.local_music_manager import LocalMusicManager, _uri_for_relative_path
 
 
 def _write_fake_mp3(path: Path, title: str = 'Test Song', artist: str = 'Test Artist'):
@@ -45,10 +45,10 @@ def test_scan_finds_mp3_files(tmp_path, monkeypatch):
     mp3.parent.mkdir(parents=True)
     mp3.write_bytes(b'fake')
 
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', music_dir / 'progress.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', music_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
 
     manager = LocalMusicManager()
     with patch.object(
@@ -71,10 +71,10 @@ def test_scan_finds_m4b_files(tmp_path, monkeypatch):
     m4b = music_dir / 'hoerbuch.m4b'
     m4b.write_bytes(b'fake')
 
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', music_dir / 'progress.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', music_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
 
     manager = LocalMusicManager()
     with patch.object(
@@ -93,10 +93,10 @@ def test_scan_finds_m4b_files(tmp_path, monkeypatch):
 def test_progress_rejects_regression(tmp_path, monkeypatch):
     music_dir = tmp_path / 'local_music'
     music_dir.mkdir(parents=True)
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', music_dir / 'progress.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', music_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
 
     manager = LocalMusicManager()
     uri = 'local:music:album/song.mp3'
@@ -109,10 +109,10 @@ def test_get_last_played_uri(tmp_path, monkeypatch):
     music_dir = tmp_path / 'local_music'
     music_dir.mkdir(parents=True)
     progress_path = music_dir / 'progress.json'
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', progress_path)
-    monkeypatch.setattr('mello.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_DIR', music_dir)
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_CATALOG_PATH', music_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('moki.managers.local_music_manager.LOCAL_MUSIC_IMAGES_DIR', music_dir / 'images')
 
     manager = LocalMusicManager()
     manager.save_progress('local:music:a.mp3', 10000, 200000, 'A', force=True)
@@ -121,7 +121,7 @@ def test_get_last_played_uri(tmp_path, monkeypatch):
 
 
 def test_open_local_music_screen_sets_launch_lock():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.HOME
     app._local_music_launch_lock = False
     app._spotify_launch_lock = False
@@ -137,8 +137,8 @@ def test_open_local_music_screen_sets_launch_lock():
     app._update_carousel_max_index = MagicMock()
     app.local_playback = SimpleNamespace(warm_up=MagicMock())
 
-    with patch('mello.app.run_async') as mock_async:
-        Mello._open_local_music_screen(app)
+    with patch('moki.app.run_async') as mock_async:
+        Moki._open_local_music_screen(app)
 
     assert app.app_screen == AppScreen.LOCAL_MUSIC
     assert app._local_music_launch_lock is True
@@ -147,7 +147,7 @@ def test_open_local_music_screen_sets_launch_lock():
 
 
 def test_restart_local_media_episode_clears_progress_and_plays_from_start():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.LOCAL_MUSIC
     item = CatalogItem(id='1', uri='local:music:song.mp3', name='Song', artist='Artist', images=[])
     app.selected_index = 0
@@ -162,7 +162,7 @@ def test_restart_local_media_episode_clears_progress_and_plays_from_start():
     app._play_local_media_item = MagicMock()
     app._local_media_manager = lambda: app.local_music_manager
 
-    Mello._restart_local_media_episode(app)
+    Moki._restart_local_media_episode(app)
 
     app.local_playback.stop.assert_called_once_with(save_progress=False)
     app.local_music_manager.clear_progress.assert_called_once_with('local:music:song.mp3')
@@ -170,7 +170,7 @@ def test_restart_local_media_episode_clears_progress_and_plays_from_start():
 
 
 def test_seek_local_media_saves_progress():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.local_playback = SimpleNamespace(
         get_state=lambda: (True, False, 90000, 200000, 'local:music:song.mp3', 'Song'),
         seek_relative=lambda _delta: True,
@@ -179,7 +179,7 @@ def test_seek_local_media_saves_progress():
     app._manager_for_context_uri = lambda uri: app.local_music_manager
     app.renderer = SimpleNamespace(invalidate=MagicMock())
 
-    Mello._seek_local_media(app, 30)
+    Moki._seek_local_media(app, 30)
 
     app.local_music_manager.save_progress.assert_called_once_with(
         'local:music:song.mp3', 90000, 200000, 'Song', force=True
@@ -187,10 +187,10 @@ def test_seek_local_media_saves_progress():
 
 
 def test_is_local_media_screen():
-    app = Mello.__new__(Mello)
+    app = Moki.__new__(Moki)
     app.app_screen = AppScreen.LOCAL_MUSIC
-    assert Mello._is_local_media_screen(app) is True
+    assert Moki._is_local_media_screen(app) is True
     app.app_screen = AppScreen.CHECKPOD
-    assert Mello._is_local_media_screen(app) is True
+    assert Moki._is_local_media_screen(app) is True
     app.app_screen = AppScreen.SPOTIFY
-    assert Mello._is_local_media_screen(app) is False
+    assert Moki._is_local_media_screen(app) is False

@@ -8,8 +8,8 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.managers.settings import Settings, DEFAULT_AUTO_PAUSE_MINUTES, DEFAULT_PROGRESS_EXPIRY_HOURS
-from mello.config import DEFAULT_ADMIN_PIN, PIN_LENGTH
+from moki.managers.settings import Settings, DEFAULT_AUTO_PAUSE_MINUTES, DEFAULT_PROGRESS_EXPIRY_HOURS
+from moki.config import DEFAULT_ADMIN_PIN, PIN_LENGTH
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ class TestSettingsPersistence:
     def test_full_cycle_wraps_around(self, settings_path):
         s = Settings(path=settings_path)
         first = s.auto_pause_minutes
-        from mello.managers.settings import AUTO_PAUSE_OPTIONS
+        from moki.managers.settings import AUTO_PAUSE_OPTIONS
         for _ in range(len(AUTO_PAUSE_OPTIONS)):
             s.cycle_auto_pause()
         assert s.auto_pause_minutes == first

@@ -6,8 +6,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mello.managers import analytics as analytics_module
-from mello.models import NowPlaying
+from moki.managers import analytics as analytics_module
+from moki.models import NowPlaying
 
 
 class _FakePosthog:
