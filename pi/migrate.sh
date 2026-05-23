@@ -1147,6 +1147,44 @@ _migrate_023() {
 }
 
 # ============================================
+# Migration 024: Install lame for voice test MP3 encoding
+# ============================================
+_migrate_024() {
+  if command -v lame >/dev/null 2>&1; then
+    log "lame already installed, skipping"
+    return
+  fi
+  sudo apt-get install -y -qq lame
+  log "Installed lame for Sprachtest MP3 encoding"
+}
+
+# ============================================
+# Migration 025: Rename home background asset (Mello → Moki)
+# ============================================
+_migrate_025() {
+  local CODE_DIR="$HOME/moki"
+  [ -d "$CODE_DIR" ] || CODE_DIR="$HOME/mello"
+  [ -d "$CODE_DIR" ] || return 0
+
+  local src="$CODE_DIR/assets/mello-background.png"
+  local dest="$CODE_DIR/assets/moki-background.png"
+  if [ -f "$dest" ]; then
+    log "moki-background.png already present"
+    if [ -f "$src" ]; then
+      rm -f "$src"
+      log "Removed legacy mello-background.png"
+    fi
+    return
+  fi
+  if [ -f "$src" ]; then
+    mv "$src" "$dest"
+    log "Renamed mello-background.png → moki-background.png"
+  else
+    log "No background asset to migrate"
+  fi
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -1172,3 +1210,5 @@ run_migration "020" "Remove auto-update cron job"
 run_migration "021" "Mello to Moki rebrand"
 run_migration "022" "Finish Moki systemd and sudoers"
 run_migration "023" "Move logs into logs/ subdirectory"
+run_migration "024" "Install lame for voice test MP3 encoding"
+run_migration "025" "Rename home background asset to moki-background.png"
