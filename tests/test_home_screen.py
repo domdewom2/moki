@@ -129,7 +129,9 @@ def test_open_spotify_screen_sets_launch_lock():
     app._spotify_launch_lock = False
     app._checkpod_launch_lock = False
     app._reset_pending_focus = MagicMock()
-    app.local_playback = SimpleNamespace(stop=MagicMock())
+    app._reset_checkpod_screen_state = MagicMock()
+    app._reset_local_music_screen_state = MagicMock()
+    app.local_playback = SimpleNamespace(is_active=False, stop=MagicMock())
     app._update_carousel_max_index = MagicMock()
     app.renderer = SimpleNamespace(invalidate=MagicMock())
     app._pressed_button = 'home_musik'
@@ -138,7 +140,7 @@ def test_open_spotify_screen_sets_launch_lock():
 
     assert app.app_screen == AppScreen.SPOTIFY
     assert app._spotify_launch_lock is True
-    app.local_playback.stop.assert_called_once()
+    app.local_playback.stop.assert_not_called()
     app._reset_pending_focus.assert_called_once_with('spotify_open')
 
 
@@ -171,6 +173,7 @@ def test_home_touch_down_highlights_checker_icon():
     app.renderer = SimpleNamespace(
         home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: False),
         home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: p == (80, 80)),
+        home_local_music_rect=types.SimpleNamespace(collidepoint=lambda p: False),
         home_settings_rect=types.SimpleNamespace(collidepoint=lambda p: False),
         invalidate=MagicMock(),
     )
@@ -189,6 +192,7 @@ def test_home_touch_down_highlights_settings_icon():
     app.renderer = SimpleNamespace(
         home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: False),
         home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: False),
+        home_local_music_rect=types.SimpleNamespace(collidepoint=lambda p: False),
         home_settings_rect=types.SimpleNamespace(collidepoint=lambda p: p == (90, 90)),
         invalidate=MagicMock(),
     )
@@ -233,6 +237,7 @@ def test_home_touch_down_highlights_musik_icon():
     app.renderer = SimpleNamespace(
         home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: p == (50, 50)),
         home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: False),
+        home_local_music_rect=types.SimpleNamespace(collidepoint=lambda p: False),
         invalidate=MagicMock(),
     )
     app._user_activated_playback = False
@@ -245,6 +250,7 @@ def test_home_touch_down_highlights_musik_icon():
 
 def test_player_home_button_opens_home_screen():
     app = Mello.__new__(Mello)
+    app.app_screen = AppScreen.SPOTIFY
     app._last_action_time = 0
     app._pressed_button = None
     app._pressed_time = 0

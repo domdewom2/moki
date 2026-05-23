@@ -312,7 +312,9 @@ def test_open_checkpod_screen_sets_launch_lock():
     app._pressed_button = 'home_checker'
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
+    app._reset_local_music_screen_state = MagicMock()
     app._update_carousel_max_index = MagicMock()
+    app._last_checkpod_context_uri = None
     app.checkpod_manager = SimpleNamespace(
         refresh_episodes=MagicMock(),
         cleanup_stale_downloads=MagicMock(),
@@ -662,6 +664,7 @@ def test_play_checkpod_item_resumes_from_saved_progress(tmp_path, monkeypatch):
     app._checkpod_play_failed_uri = None
     app._checkpod_play_failed_at = 0.0
     app._checkpod_launch_lock = True
+    app.app_screen = AppScreen.CHECKPOD
     app.checkpod_manager = manager
     app.volume = SimpleNamespace(unmute=MagicMock())
     app.renderer = SimpleNamespace(invalidate=MagicMock())
@@ -689,6 +692,7 @@ def test_play_checkpod_item_resumes_from_saved_progress(tmp_path, monkeypatch):
 
 def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
     app = Mello.__new__(Mello)
+    app.app_screen = AppScreen.CHECKPOD
     item = CatalogItem(id='1', uri='urn:ard:episode:1', name='Test Episode', images=[])
     app.selected_index = 0
     app._display_items = lambda: [item]
@@ -700,6 +704,7 @@ def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
     app._checkpod_play_failed_at = 1.0
     app._clear_manual_pause_lock = MagicMock()
     app._play_checkpod_item = MagicMock()
+    app._local_media_manager = lambda: app.checkpod_manager
 
     Mello._restart_checkpod_episode(app)
 

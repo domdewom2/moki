@@ -4,6 +4,7 @@
 requests>=2.31.0
 websocket-client>=1.7.0
 Pillow>=10.0.0
+mutagen>=1.47.0
 numpy>=1.24.0
 evdev>=1.7.0; sys_platform == 'linux'
 dbus-fast>=2.0.0; sys_platform == 'linux'

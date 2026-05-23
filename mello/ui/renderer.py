@@ -38,6 +38,8 @@ class Renderer:
         home_musik_center: Optional[Tuple[int, int]] = None,
         home_checker_icon: Optional[pygame.Surface] = None,
         home_checker_center: Optional[Tuple[int, int]] = None,
+        home_local_music_icon: Optional[pygame.Surface] = None,
+        home_local_music_center: Optional[Tuple[int, int]] = None,
         home_settings_icon: Optional[pygame.Surface] = None,
         home_settings_center: Optional[Tuple[int, int]] = None,
     ):
@@ -49,6 +51,8 @@ class Renderer:
         self._home_musik_center = home_musik_center
         self._home_checker_icon = home_checker_icon
         self._home_checker_center = home_checker_center
+        self._home_local_music_icon = home_local_music_icon
+        self._home_local_music_center = home_local_music_center
         self._home_settings_icon = home_settings_icon
         self._home_settings_center = home_settings_center
         
@@ -85,6 +89,7 @@ class Renderer:
         self.menu_content_overflow: int = 0
         self.home_musik_rect: Optional[pygame.Rect] = None
         self.home_checker_rect: Optional[pygame.Rect] = None
+        self.home_local_music_rect: Optional[pygame.Rect] = None
         self.home_settings_rect: Optional[pygame.Rect] = None
         # Header fade: spans from content_top (transparent) to screen edge (opaque)
         # Covers the entire title zone so content slides under it smoothly (iOS-style)
@@ -147,6 +152,7 @@ class Renderer:
             self.settings_button_rect = None
             self.home_musik_rect = None
             self.home_checker_rect = None
+            self.home_local_music_rect = None
             self.home_settings_rect = None
             self._draw_menu_frame(ctx)
             return None
@@ -165,6 +171,7 @@ class Renderer:
         self.settings_button_rect = None
         self.home_musik_rect = None
         self.home_checker_rect = None
+        self.home_local_music_rect = None
         self.home_settings_rect = None
         
         current_item = ctx.items[ctx.selected_index] if ctx.selected_index < len(ctx.items) else None
@@ -220,7 +227,7 @@ class Renderer:
                 ctx.pressed_button,
                 bt_connected=ctx.bt_connected,
                 bt_audio_active=ctx.bt_audio_active,
-                show_reload=ctx.app_screen == AppScreen.CHECKPOD,
+                show_reload=ctx.app_screen in (AppScreen.CHECKPOD, AppScreen.LOCAL_MUSIC),
             )
             
             if self._static_layer is None:
@@ -342,12 +349,18 @@ class Renderer:
             self.settings_button_rect = None
             if ctx.app_screen == AppScreen.CHECKPOD:
                 line1 = self._render_text_rotated('Lädt CheckPod…', self.font_medium, COLORS['text_secondary'])
+            elif ctx.app_screen == AppScreen.LOCAL_MUSIC:
+                line1 = self._render_text_rotated(
+                    'Noch keine Dateien — MP3/M4B nach data/local_music/ kopieren, dann App erneut öffnen',
+                    self.font_medium,
+                    COLORS['text_secondary'],
+                )
             else:
                 line1 = self._render_text_rotated('Play to Mello via Spotify', self.font_medium, COLORS['text_secondary'])
             line1_rect = line1.get_rect(center=(center_x - 30, center_y))
             self.screen.blit(line1, line1_rect)
 
-            if ctx.app_screen != AppScreen.CHECKPOD:
+            if ctx.app_screen == AppScreen.SPOTIFY:
                 line2 = self._render_text_rotated('Tap + to save', self.font_medium, COLORS['text_secondary'])
                 line2_rect = line2.get_rect(center=(center_x - 60, center_y))
                 self.screen.blit(line2, line2_rect)
@@ -721,6 +734,7 @@ class Renderer:
         self._needs_full_redraw = True
         self.home_musik_rect = None
         self.home_checker_rect = None
+        self.home_local_music_rect = None
         self.home_settings_rect = None
 
         if self._home_background is not None:
@@ -742,6 +756,13 @@ class Renderer:
             'home_checker',
             ctx.pressed_button,
             'home_checker_rect',
+        )
+        self._draw_home_icon(
+            self._home_local_music_icon,
+            self._home_local_music_center,
+            'home_local_music',
+            ctx.pressed_button,
+            'home_local_music_rect',
         )
         self._draw_home_icon(
             self._home_settings_icon,

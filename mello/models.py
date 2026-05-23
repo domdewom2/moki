@@ -24,6 +24,7 @@ class AppScreen(Enum):
     SPOTIFY = auto()
     HOME = auto()
     CHECKPOD = auto()
+    LOCAL_MUSIC = auto()
 
 
 @dataclass

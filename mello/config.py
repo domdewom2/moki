@@ -116,7 +116,7 @@ BTN_SPACING = (COVER_SIZE - BTN_SIZE) // 2  # 155px
 HOME_BTN_Y = CAROUSEL_CENTER_Y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
 RELOAD_BTN_Y = HOME_BTN_Y + BTN_SIZE + 20
 HEADPHONE_BTN_Y = RELOAD_BTN_Y  # Spotify
-HEADPHONE_BTN_Y_CHECKPOD = RELOAD_BTN_Y + BTN_SIZE + 20  # below reload on CheckPod
+HEADPHONE_BTN_Y_CHECKPOD = RELOAD_BTN_Y + BTN_SIZE + 20  # below reload on local media apps
 
 # Progress bar (now vertical on physical screen)
 PROGRESS_BAR_WIDTH = 8
@@ -129,9 +129,10 @@ PROGRESS_BAR_WIDTH = 8
 # Small X = user's bottom, large X = user's top; Y = user's horizontal axis.
 HOME_ICON_SIZE = 196  # 30% smaller than original 280
 HOME_ICON_SCREEN_X_FRAC = 0.32
-HOME_ICON_SCREEN_Y_FRAC = 0.50
-HOME_CHECKER_ICON_SCREEN_Y_FRAC = 0.30
-HOME_SETTINGS_ICON_SCREEN_Y_FRAC = 0.70
+HOME_CHECKER_ICON_SCREEN_Y_FRAC = 0.25
+HOME_LOCAL_MUSIC_ICON_SCREEN_Y_FRAC = 0.42
+HOME_ICON_SCREEN_Y_FRAC = 0.59
+HOME_SETTINGS_ICON_SCREEN_Y_FRAC = 0.76
 HOME_ICON_HIT_PADDING = 20
 
 # Admin PIN for settings app (4 digits, stored in settings.json)
@@ -151,6 +152,16 @@ CHECKPOD_EPISODE_LIMIT = 30
 CHECKPOD_IMAGE_PATH_PREFIX = '/checkpod/images/'
 CHECKPOD_DOWNLOAD_RETENTION_DAYS = 7
 MPV_SOCKET_PATH = '/tmp/mello-mpv.sock'
+
+# ============================================
+# LOCAL MUSIC (on-device MP3 library)
+# ============================================
+
+LOCAL_MUSIC_DIR = DATA_DIR / 'local_music'
+LOCAL_MUSIC_CATALOG_PATH = LOCAL_MUSIC_DIR / 'catalog.json'
+LOCAL_MUSIC_PROGRESS_PATH = LOCAL_MUSIC_DIR / 'progress.json'
+LOCAL_MUSIC_IMAGES_DIR = LOCAL_MUSIC_DIR / 'images'
+LOCAL_MUSIC_IMAGE_PATH_PREFIX = '/local_music/images/'
 
 # ============================================
 # VOLUME
