@@ -1,8 +1,10 @@
 """
 Tests for CheckPod (Checker Tobi) integration.
 """
+import json
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -172,6 +174,130 @@ def test_local_playback_mock_mode():
     assert controller.is_active is False
 
 
+def test_local_playback_seek_relative_mock_mode():
+    controller = LocalPlaybackController(mock_mode=True)
+    controller.play(
+        Path('/tmp/nope.mp3'),
+        context_uri='urn:ard:episode:1',
+        track_name='Testfolge',
+        start_position_ms=10000,
+        duration_ms=60000,
+    )
+    assert controller.seek_relative(30) is True
+    _, _, position_ms, _, _, _ = controller.get_state()
+    assert position_ms == 40000
+
+    assert controller.seek_relative(-30) is True
+    _, _, position_ms, _, _, _ = controller.get_state()
+    assert position_ms == 10000
+
+    assert controller.seek_relative(-99999) is True
+    _, _, position_ms, _, _, _ = controller.get_state()
+    assert position_ms == 0
+
+    assert controller.seek_relative(99999) is True
+    _, _, position_ms, _, _, _ = controller.get_state()
+    assert position_ms == 60000
+
+
+def test_local_playback_seek_relative_when_idle():
+    controller = LocalPlaybackController(mock_mode=True)
+    assert controller.seek_relative(30) is False
+
+
+def test_seek_checkpod_saves_progress():
+    app = Mello.__new__(Mello)
+    app.local_playback = SimpleNamespace(
+        get_state=lambda: (True, False, 40000, 60000, 'urn:ard:episode:1', 'Test'),
+        seek_relative=lambda delta: True,
+    )
+    app.checkpod_manager = SimpleNamespace(save_progress=MagicMock())
+    app.renderer = SimpleNamespace(invalidate=MagicMock())
+
+    Mello._seek_checkpod(app, 30)
+
+    app.checkpod_manager.save_progress.assert_called_once_with(
+        'urn:ard:episode:1', 40000, 60000, 'Test'
+    )
+    app.renderer.invalidate.assert_called_once()
+
+
+def test_checkpod_cleanup_deletes_stale_download(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    cache_dir = tmp_path / 'checkpod'
+    images_dir = cache_dir / 'images'
+    cache_dir.mkdir(parents=True)
+    progress_path = cache_dir / 'progress.json'
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
+
+    manager = CheckPodManager()
+
+    stale_id = '111'
+    fresh_id = '222'
+    active_id = '333'
+    stale_path = cache_dir / f'{stale_id}.mp3'
+    fresh_path = cache_dir / f'{fresh_id}.mp3'
+    active_path = cache_dir / f'{active_id}.mp3'
+    stale_path.write_bytes(b'stale')
+    fresh_path.write_bytes(b'fresh')
+    active_path.write_bytes(b'active')
+    images_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / f'{stale_id}.png').write_bytes(b'img')
+
+    old_date = (datetime.now() - timedelta(days=10)).isoformat()
+    fresh_date = datetime.now().isoformat()
+    progress_path.write_text(json.dumps({
+        f'urn:ard:episode:{stale_id}': {
+            'uri': f'urn:ard:episode:{stale_id}',
+            'position': 1000,
+            'duration': 60000,
+            'name': 'Stale',
+            'updatedAt': old_date,
+        },
+        f'urn:ard:episode:{fresh_id}': {
+            'uri': f'urn:ard:episode:{fresh_id}',
+            'position': 1000,
+            'duration': 60000,
+            'name': 'Fresh',
+            'updatedAt': fresh_date,
+        },
+    }))
+
+    deleted = manager.cleanup_stale_downloads(
+        active_context_uri=f'urn:ard:episode:{active_id}',
+        max_age_days=7,
+    )
+
+    assert deleted == 1
+    assert not stale_path.exists()
+    assert fresh_path.exists()
+    assert active_path.exists()
+    assert not (images_dir / f'{stale_id}.png').exists()
+    remaining = json.loads(progress_path.read_text())
+    assert f'urn:ard:episode:{stale_id}' not in remaining
+    assert f'urn:ard:episode:{fresh_id}' in remaining
+
+
+def test_checkpod_sleep_blocks_only_while_playing_not_paused():
+    from mello.managers.sleep import SleepManager
+
+    mgr = SleepManager()
+    mgr.reset_timer()
+    mgr.last_activity = __import__('time').time() - 130
+
+    assert mgr.check_sleep(is_playing=False) is True
+    mgr.wake_up()
+
+    assert mgr.check_sleep(is_playing=True) is False
+    mgr.last_activity = __import__('time').time() - 130
+    assert mgr.check_sleep(is_playing=True) is False
+    assert mgr.is_sleeping is False
+
+
 def test_open_checkpod_screen_sets_launch_lock():
     app = Mello.__new__(Mello)
     app.app_screen = AppScreen.HOME
@@ -187,8 +313,8 @@ def test_open_checkpod_screen_sets_launch_lock():
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
     app._update_carousel_max_index = MagicMock()
-    app.checkpod_manager = SimpleNamespace(refresh_episodes=MagicMock())
-    app.local_playback = SimpleNamespace(warm_up=MagicMock())
+    app.checkpod_manager = SimpleNamespace(refresh_episodes=MagicMock(), cleanup_stale_downloads=MagicMock())
+    app.local_playback = SimpleNamespace(warm_up=MagicMock(), get_state=lambda: (False, False, 0, 0, None, ''))
 
     with patch('mello.app.run_async') as mock_async:
         Mello._open_checkpod_screen(app)
@@ -198,7 +324,7 @@ def test_open_checkpod_screen_sets_launch_lock():
     assert app.selected_index == 0
     app._pause_active_playback.assert_called_once_with('checkpod_open')
     app.local_playback.warm_up.assert_called_once()
-    mock_async.assert_called_once()
+    mock_async.assert_called_once_with(app._refresh_checkpod_episodes)
 
 
 def test_open_home_screen_stops_local_playback():
@@ -326,6 +452,8 @@ def test_checkpod_paused_episode_renders_play_button():
         _update_running=False,
         _reset_confirm_pending=False,
         _shutdown_confirm_pending=False,
+        pin_buffer='',
+        change_pin_step=0,
     )
     app.settings = SimpleNamespace(
         auto_pause_minutes=30,

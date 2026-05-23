@@ -172,6 +172,27 @@ class LocalPlaybackController:
             return True
         return False
 
+    def seek_relative(self, delta_seconds: int) -> bool:
+        """Seek by delta_seconds relative to current position."""
+        if self.mock_mode:
+            with self._lock:
+                if not (self._playing or self._paused):
+                    return False
+                new_ms = self._position_ms + delta_seconds * 1000
+                if self._duration_ms > 0:
+                    new_ms = max(0, min(new_ms, self._duration_ms))
+                else:
+                    new_ms = max(0, new_ms)
+                self._position_ms = new_ms
+            self._on_state_changed()
+            return True
+        if not self.is_active:
+            return False
+        ok = self._send_command(['seek', delta_seconds, 'relative'])
+        if ok:
+            self._on_state_changed()
+        return ok
+
     def stop(self, save_progress: bool = True):
         playing, paused, position_ms, duration_ms, context_uri, track_name = self.get_state()
         if save_progress and context_uri and (playing or paused) and position_ms > 0:

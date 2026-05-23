@@ -142,6 +142,7 @@ CHECKPOD_PROGRESS_PATH = CHECKPOD_CACHE_DIR / 'progress.json'
 CHECKPOD_IMAGES_DIR = CHECKPOD_CACHE_DIR / 'images'
 CHECKPOD_EPISODE_LIMIT = 30
 CHECKPOD_IMAGE_PATH_PREFIX = '/checkpod/images/'
+CHECKPOD_DOWNLOAD_RETENTION_DAYS = 7
 MPV_SOCKET_PATH = '/tmp/mello-mpv.sock'
 
 # ============================================

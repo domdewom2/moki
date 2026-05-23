@@ -292,6 +292,7 @@ class Mello:
             ),
             get_progress_expiry=lambda: self.settings.progress_expiry_hours,
         )
+        self.checkpod_manager.cleanup_stale_downloads()
         self.local_playback = LocalPlaybackController(
             mock_mode=self.mock_mode,
             on_state_changed=self._on_local_playback_changed,
@@ -566,9 +567,15 @@ class Mello:
         self._update_carousel_max_index()
         self._pressed_button = None
         self.renderer.invalidate()
-        run_async(self.checkpod_manager.refresh_episodes)
+        run_async(self._refresh_checkpod_episodes)
         self.local_playback.warm_up()
         logger.info('CheckPod screen opened (launch lock active)')
+
+    def _refresh_checkpod_episodes(self):
+        """Refresh ARD catalog and prune stale downloads."""
+        self.checkpod_manager.refresh_episodes()
+        _, _, _, _, context_uri, _ = self.local_playback.get_state()
+        self.checkpod_manager.cleanup_stale_downloads(active_context_uri=context_uri)
 
     def _on_local_playback_changed(self):
         playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
@@ -1889,7 +1896,7 @@ class Mello:
             elif center_y - btn_spacing - BTN_SIZE <= y <= center_y - btn_spacing + BTN_SIZE:
                 button_pressed = 'prev'
                 if self.app_screen == AppScreen.CHECKPOD:
-                    self._navigate(-1)
+                    self._seek_checkpod(-30)
                 else:
                     self._skip_track(self.api.prev)
             # Play: Y = center_y (640)
@@ -1900,7 +1907,7 @@ class Mello:
             elif center_y + btn_spacing - BTN_SIZE <= y <= center_y + btn_spacing + BTN_SIZE:
                 button_pressed = 'next'
                 if self.app_screen == AppScreen.CHECKPOD:
-                    self._navigate(1)
+                    self._seek_checkpod(30)
                 else:
                     self._skip_track(self.api.next)
             # Volume: Y = vol_y (~1173) — start hold timer; action fires on release
@@ -2025,6 +2032,18 @@ class Mello:
                 self._play_item(focused_item.uri)
                 return
         self.playback.toggle_play(self.display_items, self.selected_index, self.now_playing)
+
+    def _seek_checkpod(self, delta_seconds: int):
+        """Skip forward/back within the current CheckPod episode."""
+        playing, paused, _, _, _, _ = self.local_playback.get_state()
+        if not (playing or paused):
+            return
+        if not self.local_playback.seek_relative(delta_seconds):
+            return
+        _, _, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
+        if context_uri:
+            self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, track_name)
+        self.renderer.invalidate()
 
     def _toggle_checkpod_play(self):
         """Toggle CheckPod local playback for the focused episode."""
@@ -2731,8 +2750,9 @@ class Mello:
         was_awake = not self.sleep_manager.is_sleeping
         # Don't sleep while the setup menu is open (e.g. WiFi AP mode)
         menu_open = self.setup_menu.state != MenuState.CLOSED
+        checkpod_playing, _, *_ = self.local_playback.get_state()
         self.sleep_manager.check_sleep(
-            self.now_playing.playing or self.local_playback.is_active or menu_open
+            self.now_playing.playing or checkpod_playing or menu_open
         )
         if was_awake and self.sleep_manager.is_sleeping:
             self.bluetooth.pause_monitoring()

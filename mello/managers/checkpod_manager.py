@@ -18,6 +18,7 @@ from ..api.catalog import apply_dimming, apply_rounded_corners_pil
 from ..config import (
     CHECKPOD_CACHE_DIR,
     CHECKPOD_CATALOG_PATH,
+    CHECKPOD_DOWNLOAD_RETENTION_DAYS,
     CHECKPOD_IMAGES_DIR,
     CHECKPOD_IMAGE_PATH_PREFIX,
     CHECKPOD_PROGRESS_PATH,
@@ -93,6 +94,7 @@ class CheckPodManager:
         CHECKPOD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         CHECKPOD_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         self._load_catalog_from_disk()
+        self.cleanup_stale_downloads()
 
     @property
     def items(self) -> List[CatalogItem]:
@@ -350,3 +352,69 @@ class CheckPodManager:
                 self._save_progress_data(data)
         except OSError as e:
             logger.warning(f'Error clearing CheckPod progress: {e}')
+
+    def cleanup_stale_downloads(
+        self,
+        active_context_uri: Optional[str] = None,
+        max_age_days: Optional[int] = None,
+    ) -> int:
+        """Delete cached MP3s not played within max_age_days."""
+        if max_age_days is None:
+            max_age_days = CHECKPOD_DOWNLOAD_RETENTION_DAYS
+
+        active_episode_id = self.get_episode_id_for_uri(active_context_uri) if active_context_uri else None
+        progress_data = self._load_progress_data()
+        progress_changed = False
+        deleted = 0
+        now = datetime.now()
+
+        for mp3_path in sorted(CHECKPOD_CACHE_DIR.glob('*.mp3')):
+            episode_id = mp3_path.stem
+            if episode_id == active_episode_id:
+                continue
+
+            context_uri = f'urn:ard:episode:{episode_id}'
+            entry = progress_data.get(context_uri)
+            try:
+                if entry and entry.get('updatedAt'):
+                    last_used = datetime.fromisoformat(entry['updatedAt'])
+                else:
+                    last_used = datetime.fromtimestamp(mp3_path.stat().st_mtime)
+            except (OSError, ValueError, TypeError):
+                continue
+
+            age_days = (now - last_used).total_seconds() / 86400
+            if age_days < max_age_days:
+                continue
+
+            try:
+                mp3_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning(f'CheckPod cleanup failed to delete {mp3_path}: {e}')
+                continue
+
+            self._delete_episode_images(episode_id)
+            if context_uri in progress_data:
+                del progress_data[context_uri]
+                progress_changed = True
+            deleted += 1
+            logger.info(
+                f'CheckPod cleanup: deleted {episode_id}.mp3 '
+                f'(last used {last_used.isoformat()}, age={age_days:.1f}d)'
+            )
+
+        for tmp_path in CHECKPOD_CACHE_DIR.glob('*.mp3.tmp'):
+            try:
+                age_days = (now - datetime.fromtimestamp(tmp_path.stat().st_mtime)).total_seconds() / 86400
+                if age_days >= max_age_days:
+                    tmp_path.unlink(missing_ok=True)
+                    logger.info(f'CheckPod cleanup: deleted stale temp {tmp_path.name}')
+            except OSError as e:
+                logger.warning(f'CheckPod cleanup failed to delete temp {tmp_path}: {e}')
+
+        if progress_changed:
+            self._save_progress_data(progress_data)
+
+        if deleted:
+            logger.info(f'CheckPod cleanup complete: removed {deleted} episode(s)')
+        return deleted
