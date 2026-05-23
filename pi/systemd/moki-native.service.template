@@ -9,13 +9,13 @@ Type=simple
 User=__USER__
 SupplementaryGroups=video audio input render bluetooth
 WorkingDirectory=__HOME__/moki
-ExecStartPre=-/bin/bash -c 'LOG=__HOME__/moki/moki.log; [ -s "$LOG" ] && mv "$LOG" "$LOG.$(date +%%Y%%m%%d-%%H%%M%%S)"; find __HOME__/moki -maxdepth 1 -name "moki.log.*" \( -mtime +7 -o -size +50M \) -delete'
+ExecStartPre=-/bin/bash -c 'mkdir -p __HOME__/moki/logs; LOG=__HOME__/moki/logs/moki.log; [ -s "$LOG" ] && mv "$LOG" "$LOG.$(date +%%Y%%m%%d-%%H%%M%%S)"; find __HOME__/moki/logs -maxdepth 1 -name "moki.log.*" \( -mtime +7 -o -size +50M \) -delete'
 ExecStart=__HOME__/moki/venv/bin/python -u moki.py --fullscreen
 Restart=always
 RestartSec=5
 TimeoutStopSec=5
-StandardOutput=append:__HOME__/moki/moki.log
-StandardError=append:__HOME__/moki/moki.log
+StandardOutput=append:__HOME__/moki/logs/moki.log
+StandardError=append:__HOME__/moki/logs/moki.log
 StandardInput=tty
 TTYPath=/dev/tty1
 PAMName=login

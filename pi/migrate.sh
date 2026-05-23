@@ -1015,9 +1015,19 @@ _migrate_021() {
   # 12. Portal UI
   sudo cp "$CODE_DIR/portal/index.html" /usr/local/share/wifi-connect/ui/index.html 2>/dev/null || true
 
-  # 13. Rename service log if present
-  if [ -f "$CODE_DIR/mello.log" ] && [ ! -f "$CODE_DIR/moki.log" ]; then
-    mv "$CODE_DIR/mello.log" "$CODE_DIR/moki.log"
+  # 13. Rename service log if present (legacy root location)
+  mkdir -p "$CODE_DIR/logs"
+  if [ -f "$CODE_DIR/mello.log" ] && [ ! -f "$CODE_DIR/logs/moki.log" ]; then
+    mv "$CODE_DIR/mello.log" "$CODE_DIR/logs/moki.log"
+  elif [ -f "$CODE_DIR/mello.log" ]; then
+    cat "$CODE_DIR/mello.log" >> "$CODE_DIR/logs/moki.log"
+    rm -f "$CODE_DIR/mello.log"
+  fi
+  if [ -f "$CODE_DIR/moki.log" ] && [ ! -f "$CODE_DIR/logs/moki.log" ]; then
+    mv "$CODE_DIR/moki.log" "$CODE_DIR/logs/moki.log"
+  elif [ -f "$CODE_DIR/moki.log" ]; then
+    cat "$CODE_DIR/moki.log" >> "$CODE_DIR/logs/moki.log"
+    rm -f "$CODE_DIR/moki.log"
   fi
 
   # 14. Start new services
@@ -1088,6 +1098,55 @@ _migrate_022() {
 }
 
 # ============================================
+# Migration 023: Move logs into logs/ subdirectory
+# ============================================
+_migrate_023() {
+  local CODE_DIR="$HOME/moki"
+  [ -d "$CODE_DIR" ] || CODE_DIR="$HOME/mello"
+  [ -d "$CODE_DIR" ] || return 0
+
+  mkdir -p "$CODE_DIR/logs"
+
+  local moved=0
+  for f in "$CODE_DIR"/moki.log "$CODE_DIR"/moki.log.* "$CODE_DIR"/mello.log "$CODE_DIR"/mello.log.*; do
+    [ -e "$f" ] || continue
+    local base dest
+    base=$(basename "$f")
+    dest="$CODE_DIR/logs/$base"
+    if [ ! -e "$dest" ]; then
+      mv "$f" "$dest"
+      moved=$((moved + 1))
+    elif [ "$base" = "moki.log" ] || [ "$base" = "mello.log" ]; then
+      cat "$f" >> "$dest"
+      rm -f "$f"
+      moved=$((moved + 1))
+    elif [ ! -e "$dest.migrated" ]; then
+      mv "$f" "$dest.migrated"
+      moved=$((moved + 1))
+    fi
+  done
+  log "Moved $moved log file(s) from repo root → logs/"
+
+  if [ -f "$CODE_DIR/.moki-env" ]; then
+    # shellcheck disable=SC1090
+    source "$CODE_DIR/.moki-env"
+  fi
+  MOKI_USER="${MOKI_USER:-$USER}"
+  MOKI_HOME="${MOKI_HOME:-$HOME}"
+  MOKI_UID="${MOKI_UID:-$(id -u)}"
+
+  local tmpl="$CODE_DIR/pi/systemd/moki-native.service.template"
+  if [ -f "$tmpl" ]; then
+    sed -e "s|__USER__|$MOKI_USER|g" \
+        -e "s|__HOME__|$MOKI_HOME|g" \
+        -e "s|__UID__|$MOKI_UID|g" \
+        "$tmpl" | sudo tee /etc/systemd/system/moki-native.service > /dev/null
+    sudo systemctl daemon-reload
+    log "Updated moki-native.service to log under logs/"
+  fi
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -1112,3 +1171,4 @@ run_migration "019" "Prefer 2.4 GHz WiFi"
 run_migration "020" "Remove auto-update cron job"
 run_migration "021" "Mello to Moki rebrand"
 run_migration "022" "Finish Moki systemd and sudoers"
+run_migration "023" "Move logs into logs/ subdirectory"
