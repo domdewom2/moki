@@ -45,6 +45,7 @@ PROGRESS_PATH = DATA_DIR / 'progress.json'
 SETTINGS_PATH = DATA_DIR / 'settings.json'
 IMAGES_DIR = DATA_DIR / 'images'
 ICONS_DIR = Path(__file__).parent.parent / 'icons'
+APP_LOGO = 'moki.png'
 ASSETS_DIR = Path(__file__).parent.parent / 'assets'
 LIBRESPOT_STATE_PATH = Path.home() / '.config' / 'go-librespot' / 'state.json'
 

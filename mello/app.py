@@ -15,7 +15,7 @@ import pygame
 from .config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
     LIBRESPOT_URL, LIBRESPOT_WS,
-    CATALOG_PATH, PROGRESS_PATH, IMAGES_DIR, ICONS_DIR, ASSETS_DIR,
+    CATALOG_PATH, PROGRESS_PATH, IMAGES_DIR, ICONS_DIR, APP_LOGO, ASSETS_DIR,
     MOCK_MODE,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
     CAROUSEL_X, CAROUSEL_CENTER_Y, CONTROLS_X, BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING,
@@ -167,7 +167,7 @@ class Mello:
         sees something familiar while the rest of the app initialises.
         """
         try:
-            logo_path = os.path.join(ICONS_DIR, 'mello-logo.png')
+            logo_path = os.path.join(ICONS_DIR, APP_LOGO)
             if not os.path.exists(logo_path):
                 return
             logo = pygame.image.load(logo_path).convert_alpha()
@@ -451,7 +451,7 @@ class Mello:
             'close': 'close.png',
             'back': 'back.png',
             'home': 'home.png',
-            'logo': 'mello-logo.png',
+            'logo': APP_LOGO,
         }
         for name, filename in icon_files.items():
             try:
