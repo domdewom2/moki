@@ -19,6 +19,7 @@ from .config import (
     MOCK_MODE,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
     CAROUSEL_X, CAROUSEL_CENTER_Y, CONTROLS_X, BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING,
+    HOME_BTN_Y, RELOAD_BTN_Y, HEADPHONE_BTN_Y, HEADPHONE_BTN_Y_CHECKPOD,
     CAROUSEL_TOUCH_MARGIN, MAX_SWIPE_JUMP, VELOCITY_THRESHOLDS,
     ACTION_DEBOUNCE, BUTTON_PRESS_DURATION, MENU_HOLD_TIME,
     CONTEXT_SWITCH_WATCHDOG_TIMEOUT,
@@ -365,6 +366,7 @@ class Mello:
         self._checkpod_play_failed_uri: Optional[str] = None
         self._checkpod_play_failed_at: float = 0.0
         self._checkpod_play_target_uri: Optional[str] = None
+        self._last_checkpod_context_uri: Optional[str] = None
         self._autoplay_stall_since: float = 0.0
         self._last_autoplay_stall_log: float = 0.0
         self._context_switch_stall_since: float = 0.0
@@ -451,6 +453,7 @@ class Mello:
             'close': 'close.png',
             'back': 'back.png',
             'home': 'home.png',
+            'reload': 'reload.png',
             'logo': APP_LOGO,
         }
         for name, filename in icon_files.items():
@@ -518,7 +521,8 @@ class Mello:
     def _pause_active_playback(self, reason: str):
         """Stop whatever is currently playing (Spotify or CheckPod)."""
         if self.local_playback.is_active:
-            self.local_playback.stop()
+            self._save_checkpod_progress_now(reason)
+            self.local_playback.stop(save_progress=False)
         if (self.now_playing.playing or self.playback.play_state.should_show_loading
                 or self.playback._play_in_progress):
             self.playback._execute_pause(reason)
@@ -540,7 +544,9 @@ class Mello:
 
     def _open_spotify_screen(self):
         """Return to the Spotify player carousel without auto-starting playback."""
-        self.local_playback.stop()
+        if self.local_playback.is_active:
+            self._save_checkpod_progress_now('spotify_open')
+            self.local_playback.stop(save_progress=False)
         self.app_screen = AppScreen.SPOTIFY
         self._spotify_launch_lock = True
         self._checkpod_launch_lock = False
@@ -561,9 +567,7 @@ class Mello:
         self._checkpod_play_target_uri = None
         self._checkpod_pending_focus_uri = None
         self._checkpod_pending_focus_since = 0.0
-        self.selected_index = 0
-        self.carousel.scroll_x = 0.0
-        self.carousel.set_target(0)
+        self._restore_checkpod_carousel_focus()
         self._update_carousel_max_index()
         self._pressed_button = None
         self.renderer.invalidate()
@@ -595,7 +599,58 @@ class Mello:
         self.renderer.invalidate()
 
     def _on_local_playback_stopped(self, context_uri: str, position_ms: int, duration_ms: int, name: str):
-        self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, name)
+        if context_uri:
+            self._last_checkpod_context_uri = context_uri
+        self.checkpod_manager.save_progress(
+            context_uri, position_ms, duration_ms, name, force=True
+        )
+
+    def _save_checkpod_progress_now(self, reason: str = ''):
+        """Persist CheckPod position immediately (before stop or screen change)."""
+        playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
+        if not context_uri or not (playing or paused):
+            return
+        live_position = self.local_playback.get_live_position_ms()
+        if live_position is not None:
+            position_ms = live_position
+        if position_ms <= 0:
+            return
+        saved = self.checkpod_manager.save_progress(
+            context_uri, position_ms, duration_ms, track_name, force=True
+        )
+        if not saved:
+            return
+        self._last_checkpod_context_uri = context_uri
+        self._last_checkpod_progress_save = time.time()
+        if reason:
+            logger.info(
+                f'CheckPod progress flush ({reason}) | '
+                f'{track_name} @ {position_ms // 1000}s'
+            )
+
+    def _restore_checkpod_carousel_focus(self):
+        """Scroll carousel to the last played CheckPod episode."""
+        items = self.checkpod_manager.get_display_items()
+        if not items:
+            self.selected_index = 0
+            self.carousel.scroll_x = 0.0
+            self.carousel.set_target(0)
+            return
+
+        target_uri = self.checkpod_manager.get_last_played_uri(
+            fallback_uri=self._last_checkpod_context_uri,
+        )
+        index = 0
+        if target_uri:
+            for i, item in enumerate(items):
+                if item.uri == target_uri:
+                    index = i
+                    break
+
+        self.selected_index = index
+        self.carousel.set_target(index)
+        if index > 0:
+            logger.info(f'CheckPod restored focus: {items[index].name} (index {index})')
 
     def _clear_checkpod_launch_lock(self, reason: str):
         if self._checkpod_launch_lock:
@@ -1876,19 +1931,25 @@ class Mello:
         # Volume button Y position (matches renderer)
         vol_y = center_y + (COVER_SIZE + COVER_SPACING) + COVER_SIZE_SMALL // 2 - BTN_SIZE // 2
 
-        # Home button Y position (matches renderer constant)
-        home_y = center_y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
-        hp_y = home_y + BTN_SIZE + 20
+        show_reload = self.app_screen == AppScreen.CHECKPOD
+        hp_y = HEADPHONE_BTN_Y_CHECKPOD if show_reload else HEADPHONE_BTN_Y
 
         # Portrait mode: check if X is in button column
         if CONTROLS_X - PLAY_BTN_SIZE <= x <= CONTROLS_X + PLAY_BTN_SIZE:
             button_pressed = None
 
-            # Home: Y = home_y (~107) — return to launcher from Spotify/CheckPod
-            if home_y - BTN_SIZE // 2 <= y <= home_y + BTN_SIZE // 2:
+            # Home — return to launcher from Spotify/CheckPod
+            if HOME_BTN_Y - BTN_SIZE // 2 <= y <= HOME_BTN_Y + BTN_SIZE // 2:
                 button_pressed = 'home'
                 self._open_home_screen()
-            # Headphone: Y = hp_y (~227) — only active when BT device connected
+            # Reload — CheckPod only: restart focused episode from the beginning
+            elif (
+                show_reload
+                and RELOAD_BTN_Y - BTN_SIZE // 2 <= y <= RELOAD_BTN_Y + BTN_SIZE // 2
+            ):
+                button_pressed = 'reload'
+                self._restart_checkpod_episode()
+            # Headphone — only active when BT device connected
             elif hp_y - BTN_SIZE // 2 <= y <= hp_y + BTN_SIZE // 2 and self.bluetooth.connected_device:
                 button_pressed = 'headphone'
                 self.bluetooth.toggle_audio()
@@ -1951,7 +2012,8 @@ class Mello:
 
             self.play_timer.cancel()
             if self.app_screen == AppScreen.CHECKPOD:
-                self.local_playback.stop()
+                self._save_checkpod_progress_now('snap')
+                self.local_playback.stop(save_progress=False)
             else:
                 self.playback.stop_all()
                 self.playback.last_context_uri = None
@@ -2033,6 +2095,25 @@ class Mello:
                 return
         self.playback.toggle_play(self.display_items, self.selected_index, self.now_playing)
 
+    def _restart_checkpod_episode(self):
+        """Clear saved progress and restart the focused episode from the beginning."""
+        items = self._display_items()
+        if not items or self.selected_index >= len(items):
+            return
+        item = items[self.selected_index]
+
+        if self.local_playback.is_active:
+            self.local_playback.stop(save_progress=False)
+        self.checkpod_manager.clear_progress(item.uri)
+        self._checkpod_pending_focus_uri = None
+        self._checkpod_pending_focus_since = 0.0
+        self._checkpod_play_failed_uri = None
+        self._checkpod_play_failed_at = 0.0
+        self._clear_manual_pause_lock('checkpod_reload')
+        self._user_activated_playback = True
+        logger.info(f'CheckPod episode restarted: {item.name}')
+        self._play_checkpod_item(item, from_beginning=True)
+
     def _seek_checkpod(self, delta_seconds: int):
         """Skip forward/back within the current CheckPod episode."""
         playing, paused, _, _, _, _ = self.local_playback.get_state()
@@ -2042,7 +2123,9 @@ class Mello:
             return
         _, _, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
         if context_uri:
-            self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, track_name)
+            self.checkpod_manager.save_progress(
+                context_uri, position_ms, duration_ms, track_name, force=True
+            )
         self.renderer.invalidate()
 
     def _toggle_checkpod_play(self):
@@ -2054,6 +2137,7 @@ class Mello:
         playing, paused, _, _, context_uri, _ = self.local_playback.get_state()
 
         if playing:
+            self._save_checkpod_progress_now('checkpod_pause_tap')
             self.local_playback.pause()
             self._set_manual_pause_lock('checkpod_pause_tap')
             return
@@ -2371,9 +2455,7 @@ class Mello:
     def _save_progress_on_shutdown(self):
         """Save progress synchronously before shutdown."""
         if self.app_screen == AppScreen.CHECKPOD or self.local_playback.is_active:
-            playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
-            if context_uri and position_ms > 0:
-                self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, track_name)
+            self._save_checkpod_progress_now('shutdown')
             self.local_playback.stop(save_progress=False)
         self.playback.save_progress_on_shutdown(self.now_playing)
 
@@ -2436,9 +2518,16 @@ class Mello:
         if now - self._last_checkpod_progress_save < PROGRESS_SAVE_INTERVAL:
             return
         playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
-        if context_uri and (playing or paused) and position_ms > 0:
-            self.checkpod_manager.save_progress(context_uri, position_ms, duration_ms, track_name)
-            self._last_checkpod_progress_save = now
+        if context_uri and (playing or paused):
+            live_position = self.local_playback.get_live_position_ms()
+            if live_position is not None:
+                position_ms = live_position
+            if position_ms > 0:
+                self.checkpod_manager.save_progress(
+                    context_uri, position_ms, duration_ms, track_name, force=False
+                )
+                self._last_checkpod_context_uri = context_uri
+                self._last_checkpod_progress_save = now
     
     def _collect_cover_async(self, context_uri: str, cover_url: str):
         """Collect playlist cover in background thread."""

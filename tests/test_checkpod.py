@@ -217,7 +217,7 @@ def test_seek_checkpod_saves_progress():
     Mello._seek_checkpod(app, 30)
 
     app.checkpod_manager.save_progress.assert_called_once_with(
-        'urn:ard:episode:1', 40000, 60000, 'Test'
+        'urn:ard:episode:1', 40000, 60000, 'Test', force=True
     )
     app.renderer.invalidate.assert_called_once()
 
@@ -313,7 +313,12 @@ def test_open_checkpod_screen_sets_launch_lock():
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
     app._update_carousel_max_index = MagicMock()
-    app.checkpod_manager = SimpleNamespace(refresh_episodes=MagicMock(), cleanup_stale_downloads=MagicMock())
+    app.checkpod_manager = SimpleNamespace(
+        refresh_episodes=MagicMock(),
+        cleanup_stale_downloads=MagicMock(),
+        get_display_items=lambda: [],
+        get_last_played_uri=lambda fallback_uri=None: None,
+    )
     app.local_playback = SimpleNamespace(warm_up=MagicMock(), get_state=lambda: (False, False, 0, 0, None, ''))
 
     with patch('mello.app.run_async') as mock_async:
@@ -468,3 +473,239 @@ def test_checkpod_paused_episode_renders_play_button():
 
     ctx = app.renderer.draw.call_args.args[0]
     assert ctx.is_playing is False
+
+
+def test_checkpod_save_progress_rejects_regression(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    cache_dir.mkdir(parents=True)
+    progress_path = cache_dir / 'progress.json'
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+
+    manager = CheckPodManager()
+    uri = 'urn:ard:episode:1'
+    manager.save_progress(uri, 600000, 900000, 'Episode')
+    manager.save_progress(uri, 0, 900000, 'Episode')
+
+    saved = json.loads(progress_path.read_text())
+    assert saved[uri]['position'] == 600000
+
+    assert manager.save_progress(uri, 150000, 900000, 'Episode', force=True) is True
+    saved = json.loads(progress_path.read_text())
+    assert saved[uri]['position'] == 150000
+
+
+def test_get_last_played_uri_returns_most_recent(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    cache_dir.mkdir(parents=True)
+    progress_path = cache_dir / 'progress.json'
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+
+    manager = CheckPodManager()
+    progress_path.write_text(json.dumps({
+        'urn:ard:episode:old': {
+            'uri': 'urn:ard:episode:old',
+            'position': 10000,
+            'duration': 600000,
+            'name': 'Old',
+            'updatedAt': '2026-05-20T10:00:00',
+        },
+        'urn:ard:episode:new': {
+            'uri': 'urn:ard:episode:new',
+            'position': 20000,
+            'duration': 600000,
+            'name': 'New',
+            'updatedAt': '2026-05-23T10:00:00',
+        },
+    }))
+
+    assert manager.get_last_played_uri() == 'urn:ard:episode:new'
+
+
+def test_get_last_played_uri_skips_near_complete(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    cache_dir.mkdir(parents=True)
+    progress_path = cache_dir / 'progress.json'
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+
+    manager = CheckPodManager()
+    progress_path.write_text(json.dumps({
+        'urn:ard:episode:done': {
+            'uri': 'urn:ard:episode:done',
+            'position': 590000,
+            'duration': 600000,
+            'name': 'Done',
+            'updatedAt': '2026-05-23T12:00:00',
+        },
+        'urn:ard:episode:active': {
+            'uri': 'urn:ard:episode:active',
+            'position': 120000,
+            'duration': 600000,
+            'name': 'Active',
+            'updatedAt': '2026-05-23T11:00:00',
+        },
+    }))
+
+    assert manager.get_last_played_uri() == 'urn:ard:episode:active'
+
+
+def test_restore_checkpod_carousel_focus():
+    app = Mello.__new__(Mello)
+    app._last_checkpod_context_uri = None
+    app.carousel = SimpleNamespace(set_target=MagicMock())
+    app.checkpod_manager = SimpleNamespace(
+        get_display_items=lambda: [
+            CatalogItem(id='1', uri='urn:ard:episode:1', name='First', images=[]),
+            CatalogItem(id='2', uri='urn:ard:episode:2', name='Second', images=[]),
+            CatalogItem(id='3', uri='urn:ard:episode:3', name='Third', images=[]),
+        ],
+        get_last_played_uri=lambda fallback_uri=None: 'urn:ard:episode:2',
+    )
+
+    Mello._restore_checkpod_carousel_focus(app)
+
+    assert app.selected_index == 1
+    app.carousel.set_target.assert_called_once_with(1)
+
+
+def test_save_checkpod_progress_now_uses_live_position():
+    app = Mello.__new__(Mello)
+    app._last_checkpod_progress_save = 0.0
+    app._last_checkpod_context_uri = None
+    app.local_playback = SimpleNamespace(
+        get_state=lambda: (True, False, 1000, 600000, 'urn:ard:episode:1', 'Episode'),
+        get_live_position_ms=lambda: 180000,
+    )
+    app.checkpod_manager = SimpleNamespace(save_progress=MagicMock())
+
+    Mello._save_checkpod_progress_now(app, 'home_open')
+
+    app.checkpod_manager.save_progress.assert_called_once_with(
+        'urn:ard:episode:1', 180000, 600000, 'Episode', force=True
+    )
+    assert app._last_checkpod_context_uri == 'urn:ard:episode:1'
+
+
+def test_pause_active_playback_saves_before_stop():
+    app = Mello.__new__(Mello)
+    app._last_checkpod_progress_save = 0.0
+    app._last_checkpod_context_uri = None
+    app._now_playing_lock = __import__('threading').Lock()
+    app._now_playing = NowPlaying()
+    app.playback = SimpleNamespace(
+        play_state=SimpleNamespace(should_show_loading=False),
+        _play_in_progress=False,
+        _execute_pause=MagicMock(),
+    )
+    app.local_playback = SimpleNamespace(
+        is_active=True,
+        get_state=lambda: (True, False, 120000, 600000, 'urn:ard:episode:1', 'Episode'),
+        get_live_position_ms=lambda: 120000,
+        stop=MagicMock(),
+    )
+    app.checkpod_manager = SimpleNamespace(save_progress=MagicMock())
+
+    Mello._pause_active_playback(app, 'home_open')
+
+    app.checkpod_manager.save_progress.assert_called_once()
+    app.local_playback.stop.assert_called_once_with(save_progress=False)
+    app.playback._execute_pause.assert_not_called()
+
+
+def test_local_playback_stop_uses_live_position():
+    saved = {}
+
+    def on_stopped(uri, pos, dur, name):
+        saved['uri'] = uri
+        saved['position'] = pos
+
+    controller = LocalPlaybackController(mock_mode=False, on_stopped=on_stopped)
+    controller._playing = True
+    controller._paused = False
+    controller._context_uri = 'urn:ard:episode:1'
+    controller._track_name = 'Episode'
+    controller._position_ms = 1000
+    controller._duration_ms = 600000
+    controller._query_property = lambda name: 300.0 if name == 'time-pos' else 600.0
+
+    controller.stop()
+
+    assert saved['position'] == 300000
+
+
+def test_play_checkpod_item_resumes_from_saved_progress(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    cache_dir.mkdir(parents=True)
+    mp3 = cache_dir / '16407475.mp3'
+    mp3.write_bytes(b'fake')
+    progress_path = cache_dir / 'progress.json'
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', progress_path)
+    monkeypatch.setattr('mello.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+
+    manager = CheckPodManager()
+    uri = 'urn:ard:episode:16407475'
+    manager.save_progress(uri, 150000, 600000, 'Reis')
+
+    app = Mello.__new__(Mello)
+    app._checkpod_play_in_progress = False
+    app._checkpod_play_target_uri = None
+    app._checkpod_play_failed_uri = None
+    app._checkpod_play_failed_at = 0.0
+    app._checkpod_launch_lock = True
+    app.checkpod_manager = manager
+    app.volume = SimpleNamespace(unmute=MagicMock())
+    app.renderer = SimpleNamespace(invalidate=MagicMock())
+
+    played = {}
+
+    def fake_play(path, context_uri, track_name, start_position_ms=0, duration_ms=0):
+        played['start_position_ms'] = start_position_ms
+        played['context_uri'] = context_uri
+        return True
+
+    app.local_playback = SimpleNamespace(
+        play=fake_play,
+        get_state=lambda: (False, False, 0, 0, None, ''),
+    )
+    item = CatalogItem(id='16407475', uri=uri, name='Reis', images=[])
+
+    with patch.object(manager, 'get_audio_url', return_value='https://example.com/ep.mp3'):
+        with patch('mello.app.run_async', side_effect=lambda fn: fn()):
+            Mello._play_checkpod_item(app, item)
+
+    assert played['start_position_ms'] == 150000
+    assert played['context_uri'] == uri
+
+
+def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
+    app = Mello.__new__(Mello)
+    item = CatalogItem(id='1', uri='urn:ard:episode:1', name='Test Episode', images=[])
+    app.selected_index = 0
+    app._display_items = lambda: [item]
+    app.local_playback = SimpleNamespace(is_active=True, stop=MagicMock())
+    app.checkpod_manager = SimpleNamespace(clear_progress=MagicMock())
+    app._checkpod_pending_focus_uri = 'urn:ard:episode:1'
+    app._checkpod_pending_focus_since = 1.0
+    app._checkpod_play_failed_uri = 'urn:ard:episode:1'
+    app._checkpod_play_failed_at = 1.0
+    app._clear_manual_pause_lock = MagicMock()
+    app._play_checkpod_item = MagicMock()
+
+    Mello._restart_checkpod_episode(app)
+
+    app.local_playback.stop.assert_called_once_with(save_progress=False)
+    app.checkpod_manager.clear_progress.assert_called_once_with('urn:ard:episode:1')
+    app._play_checkpod_item.assert_called_once_with(item, from_beginning=True)
+    assert app._checkpod_pending_focus_uri is None
+    assert app._checkpod_play_failed_uri is None
+    assert app._user_activated_playback is True

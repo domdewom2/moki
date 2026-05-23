@@ -93,6 +93,32 @@ class LocalPlaybackController:
                 self._track_name,
             )
 
+    def get_live_position_ms(self) -> Optional[int]:
+        """Return current position from mpv when available, else cached value."""
+        if self.mock_mode:
+            with self._lock:
+                if self._playing or self._paused:
+                    return self._position_ms
+            return None
+        time_pos = self._query_property('time-pos')
+        if time_pos is not None:
+            return max(0, int(float(time_pos) * 1000))
+        with self._lock:
+            if self._playing or self._paused:
+                return self._position_ms
+        return None
+
+    def _wait_for_media_ready(self, timeout: float = 15.0) -> bool:
+        """Wait until mpv has loaded the file and is ready to play."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            idle = self._query_property('idle-active')
+            duration = self._query_property('duration')
+            if idle is False and duration is not None and float(duration) > 0:
+                return True
+            time.sleep(0.1)
+        return False
+
     def play(
         self,
         path: Path,
@@ -114,23 +140,50 @@ class LocalPlaybackController:
 
         self.stop(save_progress=False)
         seek_sec = max(0.0, start_position_ms / 1000.0)
+
         ok = self._send_command(['loadfile', str(path), 'replace'])
         if not ok:
             self._on_error('Wiedergabe fehlgeschlagen')
             return False
+
+        if not self._wait_for_media_ready():
+            logger.warning(f'mpv media not ready after load: {path.name}')
+
         if seek_sec > 0:
-            self._send_command(['seek', seek_sec, 'absolute'])
+            for attempt in range(3):
+                self._send_command(['seek', seek_sec, 'absolute'])
+                time.sleep(0.2)
+                time_pos = self._query_property('time-pos')
+                actual_sec = float(time_pos) if time_pos is not None else 0.0
+                if abs(actual_sec - seek_sec) <= 2.0:
+                    break
+                logger.warning(
+                    f'mpv seek mismatch (attempt {attempt + 1}): '
+                    f'wanted {seek_sec:.0f}s got {actual_sec:.0f}s'
+                )
+
         self._send_command(['set_property', 'pause', False])
+        time.sleep(0.1)
+
+        actual_ms = start_position_ms
+        live = self.get_live_position_ms()
+        if live is not None:
+            actual_ms = live
+        if duration_ms <= 0:
+            duration = self._query_property('duration')
+            if duration is not None and float(duration) > 0:
+                duration_ms = int(float(duration) * 1000)
+
         with self._lock:
             self._playing = True
             self._paused = False
             self._context_uri = context_uri
             self._track_name = track_name
-            self._position_ms = start_position_ms
+            self._position_ms = actual_ms
             self._duration_ms = duration_ms
         self._start_poll_thread()
         self._on_state_changed()
-        logger.info(f'Local play started: {track_name} @ {seek_sec:.0f}s')
+        logger.info(f'Local play started: {track_name} @ {actual_ms / 1000:.0f}s')
         return True
 
     def pause(self):
@@ -195,8 +248,16 @@ class LocalPlaybackController:
 
     def stop(self, save_progress: bool = True):
         playing, paused, position_ms, duration_ms, context_uri, track_name = self.get_state()
-        if save_progress and context_uri and (playing or paused) and position_ms > 0:
-            self._on_stopped(context_uri, position_ms, duration_ms, track_name)
+        if save_progress and context_uri and (playing or paused):
+            live_position = self.get_live_position_ms()
+            if live_position is not None:
+                position_ms = live_position
+            if not self.mock_mode:
+                duration = self._query_property('duration')
+                if duration is not None and float(duration) > 0:
+                    duration_ms = int(float(duration) * 1000)
+            if position_ms > 0:
+                self._on_stopped(context_uri, position_ms, duration_ms, track_name)
 
         self._poll_stop.set()
         if self._poll_thread and self._poll_thread.is_alive():

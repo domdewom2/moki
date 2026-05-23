@@ -19,14 +19,8 @@ from ..config import (
     TRACK_INFO_X, CAROUSEL_X, CONTROLS_X, CAROUSEL_CENTER_Y,
     BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING, PROGRESS_BAR_WIDTH,
     DEFAULT_VOLUME_LEVELS, HOME_ICON_SIZE, HOME_ICON_HIT_PADDING,
-    PIN_LENGTH,
+    PIN_LENGTH, HOME_BTN_Y, RELOAD_BTN_Y, HEADPHONE_BTN_Y, HEADPHONE_BTN_Y_CHECKPOD,
 )
-
-# Home button Y position — symmetric to volume button on the opposite side.
-# Volume: center_y + (COVER_SIZE + COVER_SPACING) + COVER_SIZE_SMALL//2 - BTN_SIZE//2 ≈ 1173
-# Home: center_y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL//2 + BTN_SIZE//2 ≈ 107
-_HOME_BTN_Y = CAROUSEL_CENTER_Y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
-_HEADPHONE_BTN_Y = _HOME_BTN_Y + BTN_SIZE + 20
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +214,14 @@ class Renderer:
             # Full redraw
             self._draw_background()
             self._draw_track_info(current_item, ctx)
-            self._draw_controls(ctx.is_playing, ctx.volume_index, ctx.pressed_button,
-                                bt_connected=ctx.bt_connected, bt_audio_active=ctx.bt_audio_active)
+            self._draw_controls(
+                ctx.is_playing,
+                ctx.volume_index,
+                ctx.pressed_button,
+                bt_connected=ctx.bt_connected,
+                bt_audio_active=ctx.bt_audio_active,
+                show_reload=ctx.app_screen == AppScreen.CHECKPOD,
+            )
             
             if self._static_layer is None:
                 self._static_layer = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -519,7 +519,8 @@ class Renderer:
         )
     
     def _draw_controls(self, is_playing: bool, volume_index: int, pressed_button: Optional[str] = None,
-                       bt_connected: bool = False, bt_audio_active: bool = False):
+                       bt_connected: bool = False, bt_audio_active: bool = False,
+                       show_reload: bool = False):
         """Draw playback control buttons (portrait mode - buttons along Y axis)."""
         x = CONTROLS_X
         center_y = CAROUSEL_CENTER_Y
@@ -529,14 +530,21 @@ class Renderer:
         play_color = COLORS['accent']
 
         # Home button — always available from Spotify and CheckPod screens.
-        home_center = (x, _HOME_BTN_Y)
+        home_center = (x, HOME_BTN_Y)
         home_color = self._lighten_color(gray_color) if pressed_button == 'home' else gray_color
         draw_aa_circle(self.screen, home_color, home_center, BTN_SIZE // 2)
         self._draw_icon('home', home_center)
 
-        # Headphone button — only when BT is connected, slightly above home.
+        if show_reload:
+            reload_center = (x, RELOAD_BTN_Y)
+            reload_color = self._lighten_color(gray_color) if pressed_button == 'reload' else gray_color
+            draw_aa_circle(self.screen, reload_color, reload_center, BTN_SIZE // 2)
+            self._draw_icon('reload', reload_center)
+
+        # Headphone button — only when BT is connected.
         if bt_connected:
-            hp_center = (x, _HEADPHONE_BTN_Y)
+            hp_y = HEADPHONE_BTN_Y_CHECKPOD if show_reload else HEADPHONE_BTN_Y
+            hp_center = (x, hp_y)
             hp_color = COLORS['accent'] if bt_audio_active else gray_color
             if pressed_button == 'headphone':
                 hp_color = self._lighten_color(hp_color)

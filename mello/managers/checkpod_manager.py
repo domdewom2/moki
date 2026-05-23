@@ -326,11 +326,73 @@ class CheckPodManager:
             logger.warning(f'Error reading CheckPod progress: {e}')
             return None
 
-    def save_progress(self, context_uri: str, position_ms: int, duration_ms: int, name: str = ''):
-        if not context_uri or position_ms < 0:
-            return
+    def get_last_played_uri(self, fallback_uri: Optional[str] = None) -> Optional[str]:
+        """Return the most recently played episode URI (skips near-complete entries)."""
         try:
             data = self._load_progress_data()
+            if not data:
+                return fallback_uri
+
+            best_uri = None
+            best_time = None
+            for uri, entry in data.items():
+                if not isinstance(entry, dict):
+                    continue
+                position = max(0, int(entry.get('position') or 0))
+                duration = max(0, int(entry.get('duration') or 0))
+                if duration > 0 and position >= duration * 0.95:
+                    continue
+                updated_at = entry.get('updatedAt')
+                if not updated_at:
+                    continue
+                try:
+                    updated = datetime.fromisoformat(updated_at)
+                except (ValueError, TypeError):
+                    continue
+                if best_time is None or updated > best_time:
+                    best_time = updated
+                    best_uri = uri
+
+            return best_uri or fallback_uri
+        except (ValueError, TypeError, OSError) as e:
+            logger.warning(f'Error reading last played CheckPod URI: {e}')
+            return fallback_uri
+
+    def save_progress(
+        self,
+        context_uri: str,
+        position_ms: int,
+        duration_ms: int,
+        name: str = '',
+        force: bool = False,
+    ) -> bool:
+        """Save playback position. Returns True when written to disk."""
+        if not context_uri or position_ms < 0:
+            return False
+        try:
+            position_ms = max(0, int(position_ms or 0))
+            duration_ms = max(0, int(duration_ms or 0))
+            data = self._load_progress_data()
+            existing = data.get(context_uri)
+            if not force and isinstance(existing, dict):
+                existing_position = max(0, int(existing.get('position', 0) or 0))
+                if position_ms >= existing_position:
+                    pass
+                elif position_ms <= 3000 and existing_position > 60000:
+                    logger.info(
+                        'CheckPod progress_write_rejected | reason=stale_zero | '
+                        f'uri={context_uri[:40]} | '
+                        f'old_pos={existing_position // 1000}s | new_pos={position_ms // 1000}s'
+                    )
+                    return False
+                elif existing_position - position_ms > 2000:
+                    logger.info(
+                        'CheckPod progress_write_rejected | reason=position_regression | '
+                        f'uri={context_uri[:40]} | '
+                        f'old_pos={existing_position // 1000}s | new_pos={position_ms // 1000}s'
+                    )
+                    return False
+
             entry = {
                 'uri': context_uri,
                 'position': position_ms,
@@ -340,9 +402,11 @@ class CheckPodManager:
             }
             data[context_uri] = entry
             self._save_progress_data(data)
-            logger.debug(f'CheckPod progress saved: {name} @ {position_ms // 1000}s')
+            logger.info(f'CheckPod progress saved: {name} @ {position_ms // 1000}s')
+            return True
         except OSError as e:
             logger.warning(f'Error saving CheckPod progress: {e}', exc_info=True)
+            return False
 
     def clear_progress(self, context_uri: str):
         try:

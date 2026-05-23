@@ -112,6 +112,12 @@ PLAY_BTN_SIZE = 120
 # Button spacing along physical Y (user's horizontal)
 BTN_SPACING = (COVER_SIZE - BTN_SIZE) // 2  # 155px
 
+# Control column Y positions (portrait mode, matches renderer)
+HOME_BTN_Y = CAROUSEL_CENTER_Y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
+RELOAD_BTN_Y = HOME_BTN_Y + BTN_SIZE + 20
+HEADPHONE_BTN_Y = RELOAD_BTN_Y  # Spotify
+HEADPHONE_BTN_Y_CHECKPOD = RELOAD_BTN_Y + BTN_SIZE + 20  # below reload on CheckPod
+
 # Progress bar (now vertical on physical screen)
 PROGRESS_BAR_WIDTH = 8
 
