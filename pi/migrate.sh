@@ -1185,6 +1185,43 @@ _migrate_025() {
 }
 
 # ============================================
+# Migration 026: Start librespot after network is online (DNS ready)
+# ============================================
+_migrate_026() {
+  local CODE_DIR="$HOME/moki"
+  [ -d "$CODE_DIR" ] || CODE_DIR="$HOME/mello"
+  [ -d "$CODE_DIR" ] || return 0
+
+  if [ -f "$CODE_DIR/.moki-env" ]; then
+    # shellcheck disable=SC1090
+    source "$CODE_DIR/.moki-env"
+  fi
+  MOKI_USER="${MOKI_USER:-$USER}"
+  MOKI_HOME="${MOKI_HOME:-$HOME}"
+  MOKI_UID="${MOKI_UID:-$(id -u)}"
+
+  local tmpl="$CODE_DIR/pi/systemd/moki-librespot.service.template"
+  if [ ! -f "$tmpl" ]; then
+    log "moki-librespot.service.template not found, skipping"
+    return 0
+  fi
+
+  sed -e "s|__USER__|$MOKI_USER|g" \
+      -e "s|__HOME__|$MOKI_HOME|g" \
+      -e "s|__UID__|$MOKI_UID|g" \
+      "$tmpl" | sudo tee /etc/systemd/system/moki-librespot.service > /dev/null
+  sudo systemctl daemon-reload
+
+  if systemctl list-unit-files NetworkManager-wait-online.service >/dev/null 2>&1; then
+    sudo systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
+    log "Enabled NetworkManager-wait-online.service"
+  fi
+
+  sudo systemctl restart moki-librespot 2>/dev/null || true
+  log "Updated moki-librespot.service to wait for network-online.target"
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -1212,3 +1249,4 @@ run_migration "022" "Finish Moki systemd and sudoers"
 run_migration "023" "Move logs into logs/ subdirectory"
 run_migration "024" "Install lame for voice test MP3 encoding"
 run_migration "025" "Rename home background asset to moki-background.png"
+run_migration "026" "Start librespot after network-online (DNS ready)"

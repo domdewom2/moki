@@ -30,6 +30,8 @@ class RenderContext:
     menu_state: MenuState = MenuState.CLOSED
     menu_known_networks: List[str] = field(default_factory=list)
     menu_current_network: Optional[str] = None
+    menu_wifi_link_status: str = ''
+    menu_wifi_band_label: str = ''
     auto_pause_minutes: int = 30
     progress_expiry_hours: int = 96
     app_version_label: str = ''
@@ -51,4 +53,10 @@ class RenderContext:
     app_screen: AppScreen = AppScreen.HOME
     pin_buffer: str = ''
     change_pin_step: int = 0
+    voice_recording: bool = False
+    voice_preparing: bool = False
+    voice_encoding: bool = False
+    voice_recording_elapsed: int = 0
+    voice_has_recording: bool = False
+    voice_playing: bool = False
 

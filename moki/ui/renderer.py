@@ -1004,6 +1004,11 @@ class Renderer:
 
     def _build_wifi_content(self, ctx: 'RenderContext') -> list:
         items = []
+        if ctx.menu_wifi_link_status:
+            items.append(('header', 'Connected'))
+            items.append(('text', ctx.menu_wifi_link_status))
+            items.append(('button', 'wifi_band', ctx.menu_wifi_band_label or 'Prefer: 2.4 GHz', COLORS['bg_elevated']))
+            items.append(('separator',))
         for i, ssid in enumerate(ctx.menu_known_networks):
             is_current = ssid == ctx.menu_current_network
             color = COLORS['accent'] if is_current else COLORS['bg_elevated']

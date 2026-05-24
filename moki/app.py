@@ -24,6 +24,9 @@ from .config import (
     ACTION_DEBOUNCE, BUTTON_PRESS_DURATION, MENU_HOLD_TIME,
     CONTEXT_SWITCH_WATCHDOG_TIMEOUT,
     PROGRESS_SAVE_INTERVAL,
+    STATUS_READY_MAX_AGE,
+    STATUS_READY_WAKE_MAX_AGE,
+    STATUS_READY_WAKE_GRACE_SEC,
     POSTHOG_API_KEY, POSTHOG_HOST, ANALYTICS_DISTINCT_ID,
     ANALYTICS_INCLUDE_CONTENT, ANALYTICS_USE_MACHINE_ID,
     HOME_ICON_SIZE, HOME_ICON_SCREEN_X_FRAC, HOME_ICON_SCREEN_Y_FRAC,
@@ -349,6 +352,7 @@ class Moki:
         self._last_requested_hold_log: float = 0.0
         self._last_title_diag_log: float = 0.0
         self._last_status_ok_at: float = 0.0
+        self._wake_at: float = 0.0
         # True when status is temporarily unknown (timeout/error). While unknown
         # we keep the last known now_playing snapshot and block auto-retrigger.
         self._status_unknown: bool = False
@@ -1511,6 +1515,16 @@ class Moki:
             elif target_fps == 5 and avg_fps < 4:
                 logger.warning(f'Low FPS while idle: {avg_fps:.1f} (target: 5 FPS)')
     
+    def _status_ready_for_play(self, now: Optional[float] = None) -> bool:
+        """True when librespot status is fresh enough to auto-start playback."""
+        if self._status_unknown:
+            return False
+        now = now or time.time()
+        age = now - self._last_status_ok_at
+        if now - self._wake_at < STATUS_READY_WAKE_GRACE_SEC:
+            return age < STATUS_READY_WAKE_MAX_AGE
+        return age < STATUS_READY_MAX_AGE
+
     def _poll_status(self):
         """Poll librespot status in background.
         
@@ -2445,6 +2459,9 @@ class Moki:
         self._user_driving = False
         self._reset_pending_focus('play_enqueued')
         self.tracker.on_wake()
+        self._wake_at = time.time()
+        self._status_unknown = False
+        self._poll_wake_event.set()
         logger.info('=' * 40)
         logger.info('WAKE UP START')
         logger.info(f'  Connection state: {self.connected}')
@@ -2456,18 +2473,26 @@ class Moki:
         self._connection_fail_count = 0
         self.connected = False
         
-        # Force immediate status refresh in background
+        # Burst status refresh so play gate has a fresh snapshot immediately.
         def wake_refresh():
             try:
-                self._refresh_status()
+                for attempt in range(4):
+                    self._refresh_status()
+                    if self._last_status_ok_at >= self._wake_at:
+                        logger.info(f'  Wake status refresh OK (attempt {attempt + 1})')
+                        break
+                    time.sleep(0.4)
                 logger.info(f'  Post-refresh connected: {self.connected}')
                 logger.info(f'  Post-refresh playing: {self.now_playing.playing}')
+                logger.info(f'  Post-refresh status_age={time.time() - self._last_status_ok_at:.1f}s')
                 logger.info('WAKE UP COMPLETE')
                 logger.info('=' * 40)
             except Exception as e:
                 logger.error(f'  Wake refresh failed: {e}')
                 logger.info('WAKE UP FAILED')
                 logger.info('=' * 40)
+            finally:
+                self._poll_wake_event.set()
         
         run_async(wake_refresh)
 
@@ -2958,7 +2983,8 @@ class Moki:
         # - mute immediately on swipe (_snap_to)
         # - only request play when drag is finished, carousel is settled,
         #   focus remained unchanged for 1s, and we're connected.
-        status_ready = (time.time() - self._last_status_ok_at) < 4.0 and not self._status_unknown
+        now = time.time()
+        status_ready = self._status_ready_for_play(now)
         paused_focused_context = (
             focused_item is not None
             and self.now_playing.paused
@@ -3053,7 +3079,7 @@ class Moki:
             if self.app_screen == AppScreen.SPOTIFY and now - self._last_focus_gate_log > 3.0:
                 reason = (
                     f'startup_ready={self._startup_ready}, connected={self.connected}, '
-                    f'status_ready={(time.time() - self._last_status_ok_at) < 4.0 and not self._status_unknown}, '
+                    f'status_ready={self._status_ready_for_play(now)}, '
                     f'status_unknown={self._status_unknown}, '
                     f'user_activated={self._user_activated_playback}, '
                     f'manual_pause_lock={self._manual_pause_lock}, '
@@ -3063,9 +3089,7 @@ class Moki:
                 )
                 logger.warning(f'PLAY gate blocked | {reason}')
                 self._last_focus_gate_log = now
-            elif self._startup_ready and self.connected and (
-                self._status_unknown or (now - self._last_status_ok_at) >= 4.0
-            ):
+            elif self._startup_ready and self.connected and not self._status_ready_for_play(now):
                 if now - self._last_status_not_ready_log > 3.0:
                     logger.warning(
                         'STATUS not ready for play | '
@@ -3365,6 +3389,8 @@ class Moki:
             menu_state=self.setup_menu.state,
             menu_known_networks=self.setup_menu.known_networks,
             menu_current_network=self.setup_menu.current_network,
+            menu_wifi_link_status=self.setup_menu.wifi_link_status,
+            menu_wifi_band_label=self.setup_menu.wifi_band_label,
             auto_pause_minutes=self.settings.auto_pause_minutes,
             progress_expiry_hours=self.settings.progress_expiry_hours,
             app_version_label=self.app_version_label,

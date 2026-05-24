@@ -200,6 +200,9 @@ SYNC_COOLDOWN = 5.0  # Block sync for 5s after play timer fires
 PROGRESS_SAVE_INTERVAL = 10  # Save progress every 10 seconds
 PROGRESS_EXPIRY_HOURS = 96  # Expire saved progress after 96 hours
 CONTEXT_SWITCH_WATCHDOG_TIMEOUT = 60.0  # Hard failsafe for stuck context-switch loading
+STATUS_READY_MAX_AGE = 4.0  # Normal play gate: fresh librespot /status required
+STATUS_READY_WAKE_MAX_AGE = 15.0  # After wake, allow slightly older status snapshot
+STATUS_READY_WAKE_GRACE_SEC = 30.0  # How long after wake the relaxed gate applies
 
 # ============================================
 # TOUCH & GESTURES

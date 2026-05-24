@@ -16,6 +16,14 @@ from pathlib import Path
 
 from ..config import CATALOG_PATH, IMAGES_DIR, LIBRESPOT_STATE_PATH, SETTINGS_PATH, PIN_LENGTH
 from ..models import MenuState
+from ..utils.wifi_info import (
+    band_mode_label,
+    format_link_status,
+    mode_to_nmcli_band,
+    next_band_mode,
+    nmcli_band_to_mode,
+    parse_iw_link_output,
+)
 
 _REPO_DIR = str(Path(__file__).resolve().parent.parent.parent)
 
@@ -54,8 +62,12 @@ class SetupMenu:
         self.scroll_offset: int = 0  # pixels scrolled in current menu screen
         self.known_networks: list = []
         self.current_network: Optional[str] = None
+        self.wifi_link_status: str = ''
+        self.wifi_band_mode: str = '2.4'
+        self.wifi_band_label: str = band_mode_label('2.4')
         self._ssid_to_con_name: dict = {}
         self._wifi_process: Optional[subprocess.Popen] = None
+        self._wifi_link_refresh_at: float = 0.0
 
         # Reset confirmation state
         self._reset_confirm_pending: bool = False
@@ -173,7 +185,9 @@ class SetupMenu:
         elif self.state == MenuState.BT_LIST:
             self._handle_bt_tap(button_rects, x, y)
         elif self.state == MenuState.WIFI_LIST:
-            if 'new_network' in button_rects and button_rects['new_network'].collidepoint(x, y):
+            if 'wifi_band' in button_rects and button_rects['wifi_band'].collidepoint(x, y):
+                self._cycle_wifi_band()
+            elif 'new_network' in button_rects and button_rects['new_network'].collidepoint(x, y):
                 self._start_wifi_ap()
             else:
                 self._check_reconnect_tap(button_rects, x, y)
@@ -252,6 +266,12 @@ class SetupMenu:
         if self._shutdown_confirm_pending and time.time() - self._shutdown_confirm_time > 4:
             self._shutdown_confirm_pending = False
             self._on_invalidate()
+
+        if self.state == MenuState.WIFI_LIST:
+            now = time.time()
+            if now - self._wifi_link_refresh_at >= 3.0:
+                self._refresh_wifi_link_info()
+                self._wifi_link_refresh_at = now
 
         # Monitor manual update process
         if self._update_process is not None:
@@ -491,6 +511,100 @@ class SetupMenu:
             logger.debug(f'Could not resolve SSID for {con_name}: {e}')
         return con_name
 
+    def _active_wifi_connection_name(self) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show', '--active'],
+                capture_output=True, text=True, timeout=3,
+            )
+            for line in result.stdout.splitlines():
+                if ':802-11-wireless' in line:
+                    return line.split(':', 1)[0]
+        except Exception as e:
+            logger.debug(f'Could not read active WiFi profile: {e}')
+        return None
+
+    def _refresh_wifi_link_info(self):
+        """Read live band/signal from iw and preferred band from NetworkManager."""
+        connected = False
+        freq = signal = ssid = None
+        try:
+            result = subprocess.run(
+                ['iw', 'dev', 'wlan0', 'link'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and 'Connected to' in result.stdout:
+                connected = True
+                freq, signal, ssid = parse_iw_link_output(result.stdout)
+        except Exception as e:
+            logger.debug(f'Could not read WiFi link info: {e}')
+
+        self.wifi_link_status = format_link_status(ssid, freq, signal, connected)
+
+        con_name = self._active_wifi_connection_name()
+        if con_name:
+            self._load_wifi_band_pref(con_name)
+        self._on_invalidate()
+
+    def _load_wifi_band_pref(self, con_name: str):
+        try:
+            result = subprocess.run(
+                ['nmcli', '-g', '802-11-wireless.band', 'con', 'show', con_name],
+                capture_output=True, text=True, timeout=3,
+            )
+            self.wifi_band_mode = nmcli_band_to_mode(result.stdout)
+        except Exception as e:
+            logger.debug(f'Could not read WiFi band preference: {e}')
+        self.wifi_band_label = band_mode_label(self.wifi_band_mode)
+
+    def _apply_wifi_band_pref(self, con_name: str, mode: str):
+        band = mode_to_nmcli_band(mode)
+        try:
+            if band:
+                subprocess.run(
+                    ['sudo', 'nmcli', 'con', 'modify', con_name, '802-11-wireless.band', band],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                )
+            else:
+                subprocess.run(
+                    ['sudo', 'nmcli', 'con', 'modify', con_name, '802-11-wireless.band', ''],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                )
+            logger.info(f'WiFi band preference set to {mode} for {con_name}')
+        except Exception as e:
+            logger.warning(f'Could not set WiFi band preference: {e}')
+            self._on_toast('Band change failed')
+            return False
+        return True
+
+    def _cycle_wifi_band(self):
+        con_name = self._active_wifi_connection_name()
+        if not con_name:
+            con_name = self._ssid_to_con_name.get(self.current_network or '')
+        if not con_name:
+            self._on_toast('No WiFi profile')
+            return
+
+        new_mode = next_band_mode(self.wifi_band_mode)
+        if not self._apply_wifi_band_pref(con_name, new_mode):
+            return
+
+        self.wifi_band_mode = new_mode
+        self.wifi_band_label = band_mode_label(new_mode)
+        self._on_toast(self.wifi_band_label)
+        self._on_invalidate()
+
+        def _reconnect():
+            try:
+                subprocess.run(
+                    ['sudo', 'nmcli', 'con', 'up', con_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+                )
+            except Exception as e:
+                logger.warning(f'WiFi reconnect after band change failed: {e}')
+
+        threading.Thread(target=_reconnect, daemon=True).start()
+
     def _collect_known_networks(self):
         """Populate known_networks and current_network via nmcli."""
         try:
@@ -541,6 +655,8 @@ class SetupMenu:
     def _show_wifi_screen(self):
         logger.info('Setup menu: WiFi screen')
         self._collect_known_networks()
+        self._refresh_wifi_link_info()
+        self._wifi_link_refresh_at = time.time()
         self.state = MenuState.WIFI_LIST
         self.scroll_offset = 0
         self._on_invalidate()
@@ -694,13 +810,7 @@ class SetupMenu:
 
     def _force_wifi_24ghz(self, con_name: str):
         """Prefer 2.4 GHz for better range through walls on Pi 3 WiFi."""
-        try:
-            subprocess.run(
-                ['sudo', 'nmcli', 'con', 'modify', con_name, '802-11-wireless.band', 'bg'],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
-            )
-        except Exception as e:
-            logger.warning(f'Could not force WiFi profile to 2.4 GHz: {e}')
+        self._apply_wifi_band_pref(con_name, '2.4')
 
     def _factory_reset(self):
         """Full factory reset: catalog, settings, Spotify, Bluetooth, WiFi."""
