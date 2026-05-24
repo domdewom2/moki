@@ -623,6 +623,18 @@ class Moki:
                 or self.playback._play_in_progress):
             self.playback._execute_pause(reason)
 
+    def _playback_blocks_sleep(self) -> bool:
+        """True only when real playback should keep the display awake."""
+        playing, _, _, _, _, _ = self.local_playback.get_state()
+        if playing:
+            return True
+
+        if self.app_screen != AppScreen.SPOTIFY:
+            return False
+
+        np = self.now_playing
+        return bool(np.playing and not np.paused and np.track_name)
+
     def _open_home_screen(self):
         """Switch to home screen and stop playback immediately."""
         self._pause_active_playback('home_open')
@@ -3276,18 +3288,15 @@ class Moki:
             self._cover_collect_context = None
         
         was_awake = not self.sleep_manager.is_sleeping
-        # Don't sleep while the setup menu is open (e.g. WiFi AP mode)
         menu_open = self.setup_menu.state != MenuState.CLOSED
-        checkpod_playing, _, *_ = self.local_playback.get_state()
         voice_active = (
             self.voice_recorder.is_recording
             or self.voice_recorder.is_preparing
             or self.voice_recorder.is_encoding
             or self._is_voice_test_playing()
         )
-        self.sleep_manager.check_sleep(
-            self.now_playing.playing or checkpod_playing or menu_open or voice_active
-        )
+        playback_active = self._playback_blocks_sleep()
+        self.sleep_manager.check_sleep(playback_active or menu_open or voice_active)
         if was_awake and self.sleep_manager.is_sleeping:
             self.bluetooth.pause_monitoring()
             idle = time.time() - self.sleep_manager.last_activity
