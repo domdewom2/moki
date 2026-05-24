@@ -13,6 +13,7 @@ from .helpers import draw_aa_circle
 from .image_cache import ImageCache
 from .context import RenderContext
 from ..models import CatalogItem, MenuState, NowPlaying, AppScreen
+from ..utils.wifi_info import format_network_button_label
 from ..config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, COLORS,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
@@ -930,6 +931,7 @@ class Renderer:
         items += [
             ('separator',),
             ('button', 'change_pin', 'Change PIN', COLORS['bg_elevated']),
+            ('button', 'reboot', 'Confirm Reboot?' if ctx.reboot_confirm_pending else 'Reboot', COLORS['bg_elevated']),
             ('button', 'shutdown', 'Confirm Shutdown?' if ctx.shutdown_confirm_pending else 'Shutdown', COLORS['error']),
             ('button', 'reset', 'Confirm Factory Reset?' if ctx.reset_confirm_pending else 'Factory Reset', COLORS['error']),
         ]
@@ -1004,15 +1006,17 @@ class Renderer:
 
     def _build_wifi_content(self, ctx: 'RenderContext') -> list:
         items = []
-        if ctx.menu_wifi_link_status:
-            items.append(('header', 'Connected'))
-            items.append(('text', ctx.menu_wifi_link_status))
+        if ctx.menu_wifi_now_band:
+            items.append(('header', 'Now'))
+            items.append(('text', ctx.menu_wifi_now_band))
+            if ctx.menu_wifi_link_detail:
+                items.append(('text', ctx.menu_wifi_link_detail))
             items.append(('button', 'wifi_band', ctx.menu_wifi_band_label or 'Prefer: 2.4 GHz', COLORS['bg_elevated']))
             items.append(('separator',))
         for i, ssid in enumerate(ctx.menu_known_networks):
             is_current = ssid == ctx.menu_current_network
             color = COLORS['accent'] if is_current else COLORS['bg_elevated']
-            display = ssid if len(ssid) <= 20 else ssid[:18] + '..'
+            display = format_network_button_label(ssid, is_current, ctx.menu_wifi_now_band)
             items.append(('button', f'reconnect_{i}', display, color))
         items.append(('separator',))
         items.append(('button', 'new_network', '+ New network', COLORS['bg_elevated']))

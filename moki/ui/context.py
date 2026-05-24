@@ -30,7 +30,8 @@ class RenderContext:
     menu_state: MenuState = MenuState.CLOSED
     menu_known_networks: List[str] = field(default_factory=list)
     menu_current_network: Optional[str] = None
-    menu_wifi_link_status: str = ''
+    menu_wifi_now_band: str = ''
+    menu_wifi_link_detail: str = ''
     menu_wifi_band_label: str = ''
     auto_pause_minutes: int = 30
     progress_expiry_hours: int = 96
@@ -46,6 +47,7 @@ class RenderContext:
     menu_scroll_offset: int = 0
     reset_confirm_pending: bool = False
     shutdown_confirm_pending: bool = False
+    reboot_confirm_pending: bool = False
     update_checking: bool = False
     update_available: bool = False
     update_running: bool = False

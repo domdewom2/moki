@@ -18,7 +18,8 @@ from ..config import CATALOG_PATH, IMAGES_DIR, LIBRESPOT_STATE_PATH, SETTINGS_PA
 from ..models import MenuState
 from ..utils.wifi_info import (
     band_mode_label,
-    format_link_status,
+    format_link_detail,
+    format_now_band,
     mode_to_nmcli_band,
     next_band_mode,
     nmcli_band_to_mode,
@@ -62,7 +63,8 @@ class SetupMenu:
         self.scroll_offset: int = 0  # pixels scrolled in current menu screen
         self.known_networks: list = []
         self.current_network: Optional[str] = None
-        self.wifi_link_status: str = ''
+        self.wifi_now_band: str = ''
+        self.wifi_link_detail: str = ''
         self.wifi_band_mode: str = '2.4'
         self.wifi_band_label: str = band_mode_label('2.4')
         self._ssid_to_con_name: dict = {}
@@ -76,6 +78,10 @@ class SetupMenu:
         # Shutdown confirmation state
         self._shutdown_confirm_pending: bool = False
         self._shutdown_confirm_time: float = 0.0
+
+        # Reboot confirmation state
+        self._reboot_confirm_pending: bool = False
+        self._reboot_confirm_time: float = 0.0
 
         # Manual update state
         self._update_available: bool = False
@@ -139,6 +145,7 @@ class SetupMenu:
             self.bluetooth.stop_scan()
         self._reset_confirm_pending = False
         self._shutdown_confirm_pending = False
+        self._reboot_confirm_pending = False
         self._reset_pin_state()
         self.state = MenuState.CLOSED
         self.current_network = None
@@ -200,8 +207,20 @@ class SetupMenu:
                     self._shutdown_system()
                 else:
                     self._reset_confirm_pending = False
+                    self._reboot_confirm_pending = False
                     self._shutdown_confirm_pending = True
                     self._shutdown_confirm_time = time.time()
+                    self._on_invalidate()
+                return
+            if 'reboot' in button_rects and button_rects['reboot'].collidepoint(x, y):
+                if self._reboot_confirm_pending:
+                    self._reboot_confirm_pending = False
+                    self._reboot_system()
+                else:
+                    self._reset_confirm_pending = False
+                    self._shutdown_confirm_pending = False
+                    self._reboot_confirm_pending = True
+                    self._reboot_confirm_time = time.time()
                     self._on_invalidate()
                 return
             if 'reset' in button_rects and button_rects['reset'].collidepoint(x, y):
@@ -210,14 +229,16 @@ class SetupMenu:
                     self._factory_reset()
                 else:
                     self._shutdown_confirm_pending = False
+                    self._reboot_confirm_pending = False
                     self._reset_confirm_pending = True
                     self._reset_confirm_time = time.time()
                     self._on_invalidate()
                 return
             # Any other tap in main menu clears destructive confirmations
-            if self._reset_confirm_pending or self._shutdown_confirm_pending:
+            if self._reset_confirm_pending or self._shutdown_confirm_pending or self._reboot_confirm_pending:
                 self._reset_confirm_pending = False
                 self._shutdown_confirm_pending = False
+                self._reboot_confirm_pending = False
                 self._on_invalidate()
             if 'home' in button_rects and button_rects['home'].collidepoint(x, y):
                 self.close()
@@ -265,6 +286,9 @@ class SetupMenu:
             self._on_invalidate()
         if self._shutdown_confirm_pending and time.time() - self._shutdown_confirm_time > 4:
             self._shutdown_confirm_pending = False
+            self._on_invalidate()
+        if self._reboot_confirm_pending and time.time() - self._reboot_confirm_time > 4:
+            self._reboot_confirm_pending = False
             self._on_invalidate()
 
         if self.state == MenuState.WIFI_LIST:
@@ -539,7 +563,8 @@ class SetupMenu:
         except Exception as e:
             logger.debug(f'Could not read WiFi link info: {e}')
 
-        self.wifi_link_status = format_link_status(ssid, freq, signal, connected)
+        self.wifi_now_band = format_now_band(connected, freq)
+        self.wifi_link_detail = format_link_detail(ssid, signal, connected)
 
         con_name = self._active_wifi_connection_name()
         if con_name:
@@ -927,4 +952,25 @@ class SetupMenu:
                 self._on_toast('Shutdown failed')
 
         threading.Thread(target=_poweroff, daemon=True).start()
+        self.close()
+
+    def _reboot_system(self):
+        """Gracefully save state and reboot the Pi."""
+        logger.info('Setup menu: Reboot confirmed')
+        self._on_prepare_shutdown()
+        self._on_toast('Rebooting...')
+        self._on_invalidate()
+
+        def _reboot():
+            time.sleep(1.5)
+            try:
+                subprocess.run(
+                    ['sudo', '/usr/bin/systemctl', 'reboot'],
+                    timeout=15,
+                )
+            except Exception as ex:
+                logger.error(f'Reboot failed: {ex}')
+                self._on_toast('Reboot failed')
+
+        threading.Thread(target=_reboot, daemon=True).start()
         self.close()

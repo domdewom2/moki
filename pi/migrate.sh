@@ -1222,6 +1222,30 @@ _migrate_026() {
 }
 
 # ============================================
+# Migration 027: Allow passwordless reboot from setup menu
+# ============================================
+_migrate_027() {
+  local SUDOERS="/etc/sudoers.d/moki-wifi"
+  if [ ! -f "$SUDOERS" ]; then
+    log "sudoers file not found, skipping"
+    return
+  fi
+  if sudo grep -q 'systemctl reboot' "$SUDOERS"; then
+    log "sudoers already has systemctl reboot, skipping"
+    return
+  fi
+  local TMP="/tmp/moki-sudoers-027.$$"
+  sudo sed 's|$|, /usr/bin/systemctl reboot|' "$SUDOERS" > "$TMP"
+  if sudo visudo -cf "$TMP"; then
+    sudo install -m 440 "$TMP" "$SUDOERS"
+    log "sudoers updated: added systemctl reboot"
+  else
+    log "ERROR: sudoers validation failed, skipping"
+  fi
+  rm -f "$TMP"
+}
+
+# ============================================
 # Run all migrations
 # ============================================
 run_migration "001" "Bluetooth audio via PipeWire"
@@ -1250,3 +1274,4 @@ run_migration "023" "Move logs into logs/ subdirectory"
 run_migration "024" "Install lame for voice test MP3 encoding"
 run_migration "025" "Rename home background asset to moki-background.png"
 run_migration "026" "Start librespot after network-online (DNS ready)"
+run_migration "027" "Allow passwordless reboot from setup menu"

@@ -67,6 +67,40 @@ def band_mode_label(mode: str) -> str:
     return labels.get(mode, labels['2.4'])
 
 
+def format_now_band(connected: bool, freq_mhz: Optional[int]) -> str:
+    """Short label for the band Moki is using right now."""
+    if not connected:
+        return 'Not connected'
+    return format_frequency_label(freq_mhz)
+
+
+def format_link_detail(
+    ssid: Optional[str],
+    signal_dbm: Optional[int],
+    connected: bool,
+) -> str:
+    """SSID + signal without band (band shown separately)."""
+    if not connected:
+        return ''
+    name = ssid or 'WiFi'
+    if signal_dbm is not None:
+        return f'{name} · {signal_dbm} dBm'
+    return name
+
+
+def format_network_button_label(ssid: str, is_current: bool, now_band: str) -> str:
+    """Network list entry; active network includes live band."""
+    base = ssid if len(ssid) <= 20 else ssid[:18] + '..'
+    if not is_current or not now_band or now_band in ('Not connected', 'unknown'):
+        return base
+    suffix = f' · {now_band}'
+    max_len = 22
+    if len(base) + len(suffix) <= max_len:
+        return base + suffix
+    trim = max_len - len(suffix) - 2
+    return base[:trim] + '..' + suffix
+
+
 def format_link_status(
     ssid: Optional[str],
     freq_mhz: Optional[int],
