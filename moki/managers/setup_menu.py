@@ -48,6 +48,10 @@ class SetupMenu:
         on_volume_preview: Optional[Callable[[int, str, int], None]] = None,
         on_open_home: Optional[Callable[[], None]] = None,
         on_prepare_shutdown: Optional[Callable[[], None]] = None,
+        on_enter_voice_test: Optional[Callable[[], None]] = None,
+        on_leave_voice_test: Optional[Callable[[], None]] = None,
+        on_voice_record_toggle: Optional[Callable[[], None]] = None,
+        on_voice_play: Optional[Callable[[], None]] = None,
     ):
         self.catalog_manager = catalog_manager
         self.settings = settings
@@ -58,6 +62,10 @@ class SetupMenu:
         self._on_volume_preview = on_volume_preview
         self._on_open_home = on_open_home or (lambda: None)
         self._on_prepare_shutdown = on_prepare_shutdown or (lambda: None)
+        self._on_enter_voice_test = on_enter_voice_test or (lambda: None)
+        self._on_leave_voice_test = on_leave_voice_test or (lambda: None)
+        self._on_voice_record_toggle = on_voice_record_toggle or (lambda: None)
+        self._on_voice_play = on_voice_play or (lambda: None)
 
         self.state = MenuState.CLOSED
         self.scroll_offset: int = 0  # pixels scrolled in current menu screen
@@ -138,6 +146,8 @@ class SetupMenu:
     def close(self):
         """Close the setup menu, stopping wifi-connect and BT scan if running."""
         logger.info('Setup menu closed')
+        if self.state == MenuState.VOICE_TEST:
+            self._on_leave_voice_test()
         if self._wifi_process:
             self._kill_wifi_processes()
             self._wifi_process = None
@@ -178,6 +188,8 @@ class SetupMenu:
                 # All other submenus → back to main
                 if self.state == MenuState.BT_LIST and self.bluetooth:
                     self.bluetooth.stop_scan()
+                if self.state == MenuState.VOICE_TEST:
+                    self._on_leave_voice_test()
                 self.state = MenuState.MAIN
                 self.scroll_offset = 0
                 self._on_invalidate()
@@ -189,6 +201,8 @@ class SetupMenu:
 
         if self.state == MenuState.VOLUME_LEVELS:
             self._handle_volume_tap(button_rects, x, y)
+        elif self.state == MenuState.VOICE_TEST:
+            self._handle_voice_test_tap(button_rects, x, y)
         elif self.state == MenuState.BT_LIST:
             self._handle_bt_tap(button_rects, x, y)
         elif self.state == MenuState.WIFI_LIST:
@@ -258,6 +272,11 @@ class SetupMenu:
                 self._on_invalidate()
             elif 'volume' in button_rects and button_rects['volume'].collidepoint(x, y):
                 self.state = MenuState.VOLUME_LEVELS
+                self.scroll_offset = 0
+                self._on_invalidate()
+            elif 'voice_test' in button_rects and button_rects['voice_test'].collidepoint(x, y):
+                self._on_enter_voice_test()
+                self.state = MenuState.VOICE_TEST
                 self.scroll_offset = 0
                 self._on_invalidate()
             elif 'change_pin' in button_rects and button_rects['change_pin'].collidepoint(x, y):
@@ -477,6 +496,15 @@ class SetupMenu:
                         self._on_volume_preview(level_idx, output_type, new_val)
                     self._on_invalidate()
                 break
+
+    def _handle_voice_test_tap(self, button_rects: dict, x: int, y: int):
+        if 'voice_record' in button_rects and button_rects['voice_record'].collidepoint(x, y):
+            self._on_voice_record_toggle()
+            self._on_invalidate()
+            return
+        if 'voice_play' in button_rects and button_rects['voice_play'].collidepoint(x, y):
+            self._on_voice_play()
+            self._on_invalidate()
 
     def _show_bt_screen(self):
         logger.info('Setup menu: Bluetooth screen')

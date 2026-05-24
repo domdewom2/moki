@@ -32,6 +32,7 @@ from .config import (
     HOME_ICON_SIZE, HOME_ICON_SCREEN_X_FRAC, HOME_ICON_SCREEN_Y_FRAC,
     HOME_CHECKER_ICON_SCREEN_Y_FRAC, HOME_LOCAL_MUSIC_ICON_SCREEN_Y_FRAC,
     HOME_SETTINGS_ICON_SCREEN_Y_FRAC, MPV_SOCKET_PATH,
+    VOICE_TEST_LAST_PATH, VOICE_TEST_PLAYBACK_SPEAKER_BOOST,
 )
 from .models import CatalogItem, NowPlaying, LibrespotStatus, MenuState, AppScreen
 from .api import LibrespotAPI, NullLibrespotAPI, CatalogManager
@@ -40,9 +41,19 @@ from .managers import (
     SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager,
     SetupMenu, Settings, UsageTracker, BluetoothManager, CheckPodManager, LocalMusicManager,
 )
-from .controllers import VolumeController, PlaybackController, is_repeatable_spotify_context, LocalPlaybackController
+from .controllers import (
+    VolumeController, PlaybackController, is_repeatable_spotify_context,
+    LocalPlaybackController, VoiceRecorderController,
+)
 from .ui import ImageCache, Renderer, RenderContext
-from .utils import run_async, get_runtime_version_label, set_system_volume
+from .utils import (
+    run_async,
+    get_runtime_version_label,
+    set_system_volume,
+    configure_wm8960_mic_once,
+    mute_wm8960_output,
+    unmute_wm8960_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +325,16 @@ class Moki:
             on_stopped=self._on_local_playback_stopped,
             on_error=self._show_toast,
         )
+        self.voice_recorder = VoiceRecorderController(
+            mock_mode=self.mock_mode,
+            on_state_changed=lambda: self.renderer.invalidate(),
+            on_error=self._show_toast,
+            get_speaker_level=lambda: self.volume.speaker_level,
+            on_before_record=self._prepare_for_voice_recording,
+            should_restore_output=lambda: self.setup_menu.state != MenuState.VOICE_TEST,
+        )
+        self._voice_play_cancel = threading.Event()
+        self._voice_test_uri = 'voice:test:last'
         
         # State (with thread-safe now_playing and connected)
         self._now_playing = NowPlaying()
@@ -449,6 +470,10 @@ class Moki:
             on_volume_preview=self._preview_volume,
             on_open_home=self._open_home_screen,
             on_prepare_shutdown=self._prepare_shutdown,
+            on_enter_voice_test=self._on_enter_voice_test,
+            on_leave_voice_test=self._on_leave_voice_test,
+            on_voice_record_toggle=self._on_voice_record_toggle,
+            on_voice_play=self._on_voice_play,
         )
         # Volume button hold tracking (3s hold opens setup menu)
         self._volume_hold_start: Optional[float] = None
@@ -909,12 +934,78 @@ class Moki:
     def _prepare_shutdown(self):
         """Save playback progress and flush analytics before poweroff."""
         logger.info('Preparing for shutdown')
+        if self.voice_recorder.is_recording or self.voice_recorder.is_preparing:
+            self.voice_recorder.cancel()
         if self.local_playback.is_active:
             self.local_playback.stop()
         if self.now_playing.playing or self.playback.play_state.should_show_loading:
             self.playback._execute_pause('shutdown')
         self._save_progress_on_shutdown()
         self.tracker.on_shutdown()
+
+    def _on_enter_voice_test(self):
+        """Open Sprachtest — stop playback and keep speaker muted until play."""
+        logger.info('Voice test screen opened')
+        self._pause_active_playback('voice_test_open')
+        configure_wm8960_mic_once()
+        mute_wm8960_output()
+
+    def _on_leave_voice_test(self):
+        """Leave Sprachtest — stop capture/playback and restore speaker."""
+        logger.info('Voice test screen closed')
+        self._voice_play_cancel.set()
+        if self.voice_recorder.is_recording or self.voice_recorder.is_preparing:
+            self.voice_recorder.cancel()
+        if self._is_voice_test_playing():
+            self.local_playback.stop(save_progress=False)
+        unmute_wm8960_output(self.volume.speaker_level)
+        self.renderer.invalidate()
+
+    def _prepare_for_voice_recording(self):
+        """Free the audio path before WM8960 capture."""
+        self.local_playback.silence_for_capture()
+        if self.now_playing.playing or self.playback.has_pending_play:
+            run_async(self.api.pause)
+
+    def _prepare_voice_test_playback(self) -> int:
+        boosted = min(100, self.volume.speaker_level + VOICE_TEST_PLAYBACK_SPEAKER_BOOST)
+        unmute_wm8960_output(boosted)
+        return boosted
+
+    def _on_voice_record_toggle(self):
+        self.voice_recorder.toggle_recording()
+
+    def _on_voice_play(self):
+        if not self.voice_recorder.has_recording():
+            self._show_toast('Noch keine Aufnahme')
+            return
+        if (
+            self.voice_recorder.is_recording
+            or self.voice_recorder.is_encoding
+            or self.voice_recorder.is_preparing
+        ):
+            return
+        self._voice_play_cancel.clear()
+        self._prepare_voice_test_playback()
+
+        def _play():
+            ok = self.local_playback.play(
+                VOICE_TEST_LAST_PATH,
+                context_uri=self._voice_test_uri,
+                track_name='Sprachtest',
+                start_position_ms=0,
+                duration_ms=0,
+            )
+            if not ok and not self._voice_play_cancel.is_set():
+                self._show_toast('Wiedergabe fehlgeschlagen')
+                unmute_wm8960_output(self.volume.speaker_level)
+            self.renderer.invalidate()
+
+        run_async(_play)
+
+    def _is_voice_test_playing(self) -> bool:
+        playing, _, _, _, context_uri, _ = self.local_playback.get_state()
+        return bool(playing and context_uri == self._voice_test_uri)
     
     def _show_toast(self, message: str):
         """Show a brief toast message on screen."""
@@ -3141,6 +3232,7 @@ class Moki:
         )
         
         self.setup_menu.update()
+        self.voice_recorder.tick()
 
         # Volume hold detection: open menu after MENU_HOLD_TIME seconds
         if self._volume_hold_start is not None and not self._menu_hold_triggered:
@@ -3187,8 +3279,14 @@ class Moki:
         # Don't sleep while the setup menu is open (e.g. WiFi AP mode)
         menu_open = self.setup_menu.state != MenuState.CLOSED
         checkpod_playing, _, *_ = self.local_playback.get_state()
+        voice_active = (
+            self.voice_recorder.is_recording
+            or self.voice_recorder.is_preparing
+            or self.voice_recorder.is_encoding
+            or self._is_voice_test_playing()
+        )
         self.sleep_manager.check_sleep(
-            self.now_playing.playing or checkpod_playing or menu_open
+            self.now_playing.playing or checkpod_playing or menu_open or voice_active
         )
         if was_awake and self.sleep_manager.is_sleeping:
             self.bluetooth.pause_monitoring()
@@ -3414,6 +3512,12 @@ class Moki:
             app_screen=self.app_screen,
             pin_buffer=self.setup_menu.pin_buffer,
             change_pin_step=self.setup_menu.change_pin_step,
+            voice_recording=self.voice_recorder.is_recording,
+            voice_preparing=self.voice_recorder.is_preparing,
+            voice_encoding=self.voice_recorder.is_encoding,
+            voice_recording_elapsed=self.voice_recorder.recording_elapsed,
+            voice_has_recording=self.voice_recorder.has_recording(),
+            voice_playing=self._is_voice_test_playing(),
         )
         dirty_rects = self.renderer.draw(ctx)
         if self.delete_mode_id and self.renderer.delete_button_rect:

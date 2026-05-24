@@ -164,6 +164,18 @@ LOCAL_MUSIC_IMAGES_DIR = LOCAL_MUSIC_DIR / 'images'
 LOCAL_MUSIC_IMAGE_PATH_PREFIX = '/local_music/images/'
 
 # ============================================
+# VOICE TEST (Sprachtest in settings)
+# ============================================
+
+VOICE_TEST_DIR = DATA_DIR / 'voice_test'
+VOICE_TEST_LAST_PATH = VOICE_TEST_DIR / 'last.mp3'
+VOICE_TEST_MAX_SECONDS = 120
+VOICE_TEST_SAMPLE_RATE = 44100
+VOICE_TEST_MP3_BITRATE = 128
+VOICE_TEST_LAME_QUALITY = 5  # warmer than q=2 — better for speech
+VOICE_TEST_PLAYBACK_SPEAKER_BOOST = 15  # extra speaker % for Sprachtest playback only
+
+# ============================================
 # VOLUME
 # ============================================
 

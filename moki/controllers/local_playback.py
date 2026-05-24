@@ -280,6 +280,28 @@ class LocalPlaybackController:
         self.stop(save_progress=True)
         self._kill_mpv()
 
+    def wait_until_idle(self, timeout: float = 2.5) -> bool:
+        """Wait until mpv is not playing (for handoff to arecord)."""
+        if self.mock_mode:
+            with self._lock:
+                if not (self._playing or self._paused):
+                    return True
+            time.sleep(0.1)
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.is_active:
+                idle = self._query_property('idle-active')
+                if idle is not False:
+                    return True
+            time.sleep(0.05)
+        return not self.is_active
+
+    def silence_for_capture(self, timeout: float = 2.5) -> bool:
+        """Stop local playback and wait until the audio path is free."""
+        self.stop(save_progress=False)
+        return self.wait_until_idle(timeout=timeout)
+
     def _mock_play(
         self,
         context_uri: str,

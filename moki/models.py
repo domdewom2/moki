@@ -17,6 +17,7 @@ class MenuState(Enum):
     WIFI_AP = auto()
     BT_LIST = auto()
     VOLUME_LEVELS = auto()
+    VOICE_TEST = auto()
 
 
 class AppScreen(Enum):

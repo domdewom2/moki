@@ -871,6 +871,10 @@ class Renderer:
             title = 'Volume'
             nav_icon = 'back'
             items = self._build_volume_content(ctx)
+        elif ctx.menu_state == MenuState.VOICE_TEST:
+            title = 'Sprachtest'
+            nav_icon = 'back'
+            items = self._build_voice_test_content(ctx)
         else:
             return
 
@@ -914,6 +918,7 @@ class Renderer:
             ('button', 'wifi', 'WiFi', COLORS['bg_elevated']),
             ('button', 'bluetooth', 'Bluetooth', COLORS['bg_elevated']),
             ('button', 'volume', 'Volume levels', COLORS['bg_elevated']),
+            ('button', 'voice_test', 'Sprachtest', COLORS['bg_elevated']),
             ('separator',),
             ('button', 'auto_pause', f'Auto-pause: {ctx.auto_pause_minutes} min', COLORS['bg_elevated']),
             ('button', 'progress_expiry', f'Remember: {ctx.progress_expiry_hours} hrs', COLORS['bg_elevated']),
@@ -937,6 +942,32 @@ class Renderer:
         ]
         if ctx.app_version_label:
             items.append(('footer', f'Version: {ctx.app_version_label}'))
+        return items
+
+    def _build_voice_test_content(self, ctx: 'RenderContext') -> list:
+        if ctx.voice_recording:
+            status = f'Aufnahme… {ctx.voice_recording_elapsed}s'
+        elif ctx.voice_preparing:
+            status = 'Vorbereiten…'
+        elif ctx.voice_encoding:
+            status = 'Speichern…'
+        elif ctx.voice_playing:
+            status = 'Wiedergabe…'
+        elif ctx.voice_has_recording:
+            status = 'Bereit — tippe Abspielen'
+        else:
+            status = 'Noch keine Aufnahme'
+
+        items = [
+            ('text', status),
+            ('spacer',),
+        ]
+        if ctx.voice_recording:
+            items.append(('button', 'voice_record', 'Stop', COLORS['error']))
+        elif not ctx.voice_encoding and not ctx.voice_preparing:
+            items.append(('button', 'voice_record', 'Aufnehmen', COLORS['accent']))
+        if ctx.voice_has_recording and not ctx.voice_recording and not ctx.voice_encoding and not ctx.voice_preparing:
+            items.append(('button', 'voice_play', 'Abspielen', COLORS['bg_elevated']))
         return items
 
     def _draw_pin_screen(self, ctx: 'RenderContext', title: str, subtitle: str):
