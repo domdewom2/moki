@@ -11,7 +11,7 @@ from typing import Optional, Callable, List
 from ..api.librespot import LibrespotAPIProtocol
 from ..api.catalog import CatalogManager
 from ..models import CatalogItem, NowPlaying, PlayState
-from ..config import PROGRESS_SAVE_INTERVAL
+from ..config import PROGRESS_SAVE_INTERVAL, PLAY_CONTEXT_WAIT_SEC
 from ..utils import run_async
 from .volume import VolumeController
 
@@ -393,6 +393,17 @@ class PlaybackController:
 
             if success and need_seek:
                 position = saved_progress['position']
+                deadline = time.time() + PLAY_CONTEXT_WAIT_SEC
+                while time.time() < deadline:
+                    if _stale():
+                        return
+                    try:
+                        status = self.api.status()
+                        if isinstance(status, dict) and status.get('context_uri') == uri:
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.25)
                 if self.api.seek(position):
                     logger.info(f'Seeked to {position // 1000}s')
                 self.api.resume()

@@ -3,7 +3,7 @@ Librespot API Client - Direct REST API for go-librespot.
 """
 import logging
 import time
-from typing import Optional, Protocol, runtime_checkable
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 import requests
 
@@ -30,8 +30,13 @@ class LibrespotAPIProtocol(Protocol):
 class LibrespotAPI:
     """Direct REST API client for go-librespot."""
     
-    def __init__(self, base_url: str):
+    def __init__(
+        self,
+        base_url: str,
+        on_transport_failure: Optional[Callable[[str], None]] = None,
+    ):
         self.base_url = base_url
+        self._on_transport_failure = on_transport_failure
         self.session = requests.Session()
         self.session.headers['Content-Type'] = 'application/json'
         self._next_allowed_at = {
@@ -41,11 +46,28 @@ class LibrespotAPI:
             'next': 0.0,
             'prev': 0.0,
             'volume': 0.0,
+            'seek': 0.0,
         }
         self._backoff_s = {k: 0.0 for k in self._next_allowed_at}
         self._last_backoff_log = {k: 0.0 for k in self._next_allowed_at}
         self._suppressed_count = {k: 0 for k in self._next_allowed_at}
         self._failure_count = {k: 0 for k in self._next_allowed_at}
+
+    def _recycle_session(self):
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = requests.Session()
+        self.session.headers['Content-Type'] = 'application/json'
+        logger.info('API session recycled after transport error')
+
+    def _handle_transport_error(self, command: str, error: Exception):
+        if isinstance(error, (requests.Timeout, requests.ReadTimeout)):
+            self._recycle_session()
+        self._record_result(command, False)
+        if self._on_transport_failure:
+            self._on_transport_failure(command)
 
     def _allow_request(self, command: str) -> bool:
         now = time.time()
@@ -137,7 +159,7 @@ class LibrespotAPI:
             return ok
         except requests.RequestException as e:
             logger.error(f'Play error for URI {uri[:50] if uri else "None"}...: {e}', exc_info=True)
-            self._record_result('play', False)
+            self._handle_transport_error('play', e)
             return False
     
     def pause(self) -> bool:
@@ -151,7 +173,7 @@ class LibrespotAPI:
             return resp.ok
         except requests.RequestException as e:
             logger.error('Pause error', exc_info=True)
-            self._record_result('pause', False)
+            self._handle_transport_error('pause', e)
             return False
     
     def resume(self) -> bool:
@@ -165,7 +187,7 @@ class LibrespotAPI:
             return resp.ok
         except requests.RequestException as e:
             logger.error('Resume error', exc_info=True)
-            self._record_result('resume', False)
+            self._handle_transport_error('resume', e)
             return False
     
     def next(self) -> bool:
@@ -179,7 +201,7 @@ class LibrespotAPI:
             return resp.ok
         except requests.RequestException as e:
             logger.error('Next error', exc_info=True)
-            self._record_result('next', False)
+            self._handle_transport_error('next', e)
             return False
 
     def prev(self) -> bool:
@@ -193,11 +215,13 @@ class LibrespotAPI:
             return resp.ok
         except requests.RequestException as e:
             logger.error('Prev error', exc_info=True)
-            self._record_result('prev', False)
+            self._handle_transport_error('prev', e)
             return False
     
     def seek(self, position: int) -> bool:
         """Seek to position in milliseconds."""
+        if not self._allow_request('seek'):
+            return False
         try:
             resp = self.session.post(
                 f'{self.base_url}/player/seek',
@@ -205,9 +229,12 @@ class LibrespotAPI:
                 timeout=2
             )
             logger.debug(f'Seek to {position}ms: {resp.status_code}')
-            return resp.ok
+            ok = resp.ok
+            self._record_result('seek', ok)
+            return ok
         except requests.RequestException as e:
             logger.error(f'Seek error to position {position}ms', exc_info=True)
+            self._handle_transport_error('seek', e)
             return False
     
     def set_volume(self, level: int) -> bool:
@@ -225,7 +252,7 @@ class LibrespotAPI:
             return resp.ok
         except requests.RequestException as e:
             logger.error(f'Volume error setting level {level}%', exc_info=True)
-            self._record_result('volume', False)
+            self._handle_transport_error('volume', e)
             return False
 
     def set_repeat_context(self, enabled: bool) -> bool:

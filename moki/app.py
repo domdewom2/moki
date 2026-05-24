@@ -27,6 +27,9 @@ from .config import (
     STATUS_READY_MAX_AGE,
     STATUS_READY_WAKE_MAX_AGE,
     STATUS_READY_WAKE_GRACE_SEC,
+    LIBRESPOT_RECOVERY_CONTEXT_STALL_SEC,
+    SNAP_PAUSE_SETTLE_SEC,
+    MANUAL_PLAY_SUPPRESS_SEC,
     POSTHOG_API_KEY, POSTHOG_HOST, ANALYTICS_DISTINCT_ID,
     ANALYTICS_INCLUDE_CONTENT, ANALYTICS_USE_MACHINE_ID,
     HOME_ICON_SIZE, HOME_ICON_SCREEN_X_FRAC, HOME_ICON_SCREEN_Y_FRAC,
@@ -40,6 +43,7 @@ from .handlers import TouchHandler, EventListener, EvdevTouchHandler
 from .managers import (
     SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager,
     SetupMenu, Settings, UsageTracker, BluetoothManager, CheckPodManager, LocalMusicManager,
+    LibrespotRecoveryManager,
 )
 from .controllers import (
     VolumeController, PlaybackController, is_repeatable_spotify_context,
@@ -302,6 +306,17 @@ class Moki:
             on_play_failed=self._on_play_failed,
         )
 
+        self.librespot_recovery = LibrespotRecoveryManager(
+            api=self.api,
+            has_network_fn=self._has_network_connection,
+            on_before_restart=self._on_librespot_before_restart,
+            on_after_restart=self._on_librespot_after_restart,
+            on_toast=self._show_toast,
+            mock_mode=self.mock_mode,
+        )
+        if not self.mock_mode and isinstance(self.api, LibrespotAPI):
+            self.api._on_transport_failure = self.librespot_recovery.note_transport_failure
+
         self.checkpod_manager = CheckPodManager(
             on_toast=self._show_toast,
             on_invalidate=lambda: (
@@ -383,6 +398,9 @@ class Moki:
         self._last_play_commit_uri: Optional[str] = None
         self._last_play_commit_at: float = 0.0
         self._last_snap_pause_at: float = 0.0
+        self._snap_pause_generation: int = 0
+        self._manual_play_suppress_uri: Optional[str] = None
+        self._manual_play_suppress_until: float = 0.0
         self._last_restore_handled_at: float = 0.0
         self._restore_dedup_count: int = 0
         self._repeat_context_uri: Optional[str] = None
@@ -1152,6 +1170,74 @@ class Moki:
         else:
             logger.info(f'Play failed for stale request: uri={uri[:40]} epoch={epoch}')
 
+    def _suppress_focus_autoplay(self, uri: str):
+        """Block focus-stable auto-play briefly after explicit user play."""
+        self._manual_play_suppress_uri = uri
+        self._manual_play_suppress_until = time.time() + MANUAL_PLAY_SUPPRESS_SEC
+
+    def _on_librespot_before_restart(self):
+        """Prepare UI before librespot systemd restart."""
+        self.playback.stop_all()
+        self.volume.mute()
+        self.renderer.invalidate()
+
+    def _on_librespot_after_restart(self, ok: bool):
+        """Reconnect and retry playback after librespot restart."""
+        if not ok:
+            self._show_toast('Spotify-Verbindung fehlgeschlagen')
+            return
+        self._connection_fail_count = 0
+        self.connected = False
+        self._poll_wake_event.set()
+
+        def _post_restart():
+            try:
+                for _ in range(6):
+                    self._refresh_status()
+                    if self.connected:
+                        break
+                    time.sleep(0.5)
+                if self.connected:
+                    self.playback.retry_failed()
+            except Exception as e:
+                logger.error(f'Post librespot restart refresh failed: {e}')
+
+        run_async(_post_restart)
+
+    def _maybe_recover_librespot(self, reason: str) -> bool:
+        """Try librespot restart if triggers match. Returns True if started."""
+        if self.mock_mode:
+            return False
+        if reason == 'connection_lost':
+            if not self.librespot_recovery.should_restart_for_connection(
+                self.connected, self._connection_fail_count
+            ):
+                return False
+        elif reason == 'context_stall':
+            pass  # caller validates stall conditions
+        elif reason == 'play_timeout_cascade':
+            if not self.librespot_recovery.should_restart_for_timeouts():
+                return False
+        return self.librespot_recovery.maybe_restart(reason)
+
+    def _schedule_deferred_snap_pause(self):
+        """Send remote pause only after carousel settles (local mute is immediate)."""
+        self._snap_pause_generation += 1
+        gen = self._snap_pause_generation
+
+        def _deferred():
+            time.sleep(SNAP_PAUSE_SETTLE_SEC)
+            if gen != self._snap_pause_generation:
+                return
+            if self.app_screen != AppScreen.SPOTIFY:
+                return
+            if self.touch.dragging or not self.carousel.settled:
+                return
+            self._last_snap_pause_at = time.time()
+            run_async(self.api.pause)
+
+        run_async(_deferred)
+
     def _reset_pending_focus(self, reason: str = ''):
         """Clear pending focus-stability request timer."""
         if self._pending_focus_uri and reason:
@@ -1228,7 +1314,23 @@ class Moki:
             return
 
         stall_age = now - self._context_switch_stall_since
+        spotify_ctx = self.now_playing.context_uri
+        if (
+            stall_age >= LIBRESPOT_RECOVERY_CONTEXT_STALL_SEC
+            and waiting_for_switch_commit
+            and not spotify_ctx
+            and self.librespot_recovery.should_restart_for_context_stall(
+                stall_age, spotify_ctx, waiting_for_switch_commit
+            )
+        ):
+            if self._maybe_recover_librespot('context_stall'):
+                self._reset_context_switch_watchdog()
+                return
+
         if stall_age >= CONTEXT_SWITCH_WATCHDOG_TIMEOUT:
+            if self._maybe_recover_librespot('watchdog'):
+                self._reset_context_switch_watchdog()
+                return
             self._trigger_context_switch_watchdog(focused_item, stall_age)
             self._reset_context_switch_watchdog()
             return
@@ -1711,6 +1813,14 @@ class Moki:
             else:
                 logger.warning(f'CONNECTION LOST after {self._connection_fail_count} failures')
             logger.info(f'  fail_count={self._connection_fail_count}, status={raw is not None}')
+
+        if not self.connected:
+            if self._maybe_recover_librespot('connection_lost'):
+                pass
+            elif self.librespot_recovery.should_restart_for_timeouts():
+                self._maybe_recover_librespot('play_timeout_cascade')
+        elif self.librespot_recovery.should_restart_for_timeouts():
+            self._maybe_recover_librespot('play_timeout_cascade')
         
         if raw and isinstance(raw, dict):
             self._last_status_ok_at = time.time()
@@ -2353,8 +2463,7 @@ class Moki:
                     (self.now_playing.playing or self.playback.has_pending_play)
                 )
                 if should_pause_remote:
-                    self._last_snap_pause_at = now
-                    run_async(self.api.pause)
+                    self._schedule_deferred_snap_pause()
             self._user_driving = True
             self._user_driving_since = time.time()
 
@@ -2423,9 +2532,17 @@ class Moki:
                     'Paused state: forcing focused context play '
                     f'(focused={focused_item.uri[:40]}, paused_ctx={(self.now_playing.context_uri or "none")[:40]})'
                 )
+                self._suppress_focus_autoplay(focused_item.uri)
                 self._play_item(focused_item.uri)
                 return
-        self.playback.toggle_play(self.display_items, self.selected_index, self.now_playing)
+        if items and self.selected_index < len(items):
+            focused = items[self.selected_index]
+            if (
+                not focused.is_temp
+                and not (self.now_playing.playing or self.playback.has_pending_play)
+            ):
+                self._suppress_focus_autoplay(focused.uri)
+        self.playback.toggle_play(items, self.selected_index, self.now_playing)
 
     def _restart_local_media_episode(self):
         """Clear saved progress and restart the focused local track from the beginning."""
@@ -3135,47 +3252,52 @@ class Moki:
                 self._requested_focus_since = 0.0
                 self.volume.unmute()
             elif not self.playback.play_in_progress:
-                now = time.time()
                 focused_uri = focused_item.uri
-                hold_current_request = False
-                if (self._requested_focus_epoch == self._focus_epoch and
-                        self._requested_focus_uri == focused_uri):
-                    # Already requested this exact focus/epoch; wait for status confirmation.
-                    # If confirmation never arrives, allow a controlled retry.
-                    request_age = now - self._requested_focus_since
-                    if request_age < 12.0:
-                        hold_current_request = True
+                if (
+                    self._manual_play_suppress_uri == focused_uri
+                    and now < self._manual_play_suppress_until
+                ):
+                    self._reset_pending_focus('manual_play_suppress')
+                else:
+                    hold_current_request = False
+                    if (self._requested_focus_epoch == self._focus_epoch and
+                            self._requested_focus_uri == focused_uri):
+                        # Already requested this exact focus/epoch; wait for status confirmation.
+                        # If confirmation never arrives, allow a controlled retry.
+                        request_age = now - self._requested_focus_since
+                        if request_age < 12.0:
+                            hold_current_request = True
+                            if self._pending_focus_uri != focused_uri:
+                                self._pending_focus_uri = focused_uri
+                                self._pending_focus_since = now
+                            if now - self._last_requested_hold_log > 2.5:
+                                logger.warning(
+                                    'PLAY hold | waiting status confirmation '
+                                    f'age={request_age:.1f}s | focused_uri={focused_uri[:40]} '
+                                    f'| epoch={self._focus_epoch} | spotify_ctx={(self.now_playing.context_uri or "none")[:40]} '
+                                    f'| spotify_playing={self.now_playing.playing} | loading={self.playback.play_state.is_loading}'
+                                )
+                                self._last_requested_hold_log = now
+                        else:
+                            logger.warning(
+                                f'PLAY request stale for {request_age:.1f}s, retrying same focus '
+                                f'uri={focused_uri[:40]} epoch={self._focus_epoch}'
+                            )
+                            self._requested_focus_epoch = None
+                            self._requested_focus_uri = None
+                            self._requested_focus_since = 0.0
+                    if not hold_current_request:
                         if self._pending_focus_uri != focused_uri:
                             self._pending_focus_uri = focused_uri
                             self._pending_focus_since = now
-                        if now - self._last_requested_hold_log > 2.5:
-                            logger.warning(
-                                'PLAY hold | waiting status confirmation '
-                                f'age={request_age:.1f}s | focused_uri={focused_uri[:40]} '
-                                f'| epoch={self._focus_epoch} | spotify_ctx={(self.now_playing.context_uri or "none")[:40]} '
-                                f'| spotify_playing={self.now_playing.playing} | loading={self.playback.play_state.is_loading}'
-                            )
-                            self._last_requested_hold_log = now
-                    else:
-                        logger.warning(
-                            f'PLAY request stale for {request_age:.1f}s, retrying same focus '
-                            f'uri={focused_uri[:40]} epoch={self._focus_epoch}'
-                        )
-                        self._requested_focus_epoch = None
-                        self._requested_focus_uri = None
-                        self._requested_focus_since = 0.0
-                if not hold_current_request:
-                    if self._pending_focus_uri != focused_uri:
-                        self._pending_focus_uri = focused_uri
-                        self._pending_focus_since = now
-                        logger.info(f'Focus stable timer start: {focused_item.name} (1s)')
-                    elif now - self._pending_focus_since >= 1.0:
-                        logger.info(f'Focus stable 1s -> play request: {focused_item.name}')
-                        self._requested_focus_epoch = self._focus_epoch
-                        self._requested_focus_uri = focused_uri
-                        self._requested_focus_since = now
-                        self._play_item(focused_uri)
-                        self._reset_pending_focus('request_sent_after_1s_dwell')
+                            logger.info(f'Focus stable timer start: {focused_item.name} (1s)')
+                        elif now - self._pending_focus_since >= 1.0:
+                            logger.info(f'Focus stable 1s -> play request: {focused_item.name}')
+                            self._requested_focus_epoch = self._focus_epoch
+                            self._requested_focus_uri = focused_uri
+                            self._requested_focus_since = now
+                            self._play_item(focused_uri)
+                            self._reset_pending_focus('request_sent_after_1s_dwell')
         else:
             # Throttled diagnostics: why focus-gate is blocking play requests.
             now = time.time()

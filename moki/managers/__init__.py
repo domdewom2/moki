@@ -11,10 +11,11 @@ from .analytics import UsageTracker
 from .bluetooth import BluetoothManager, BluetoothDevice
 from .checkpod_manager import CheckPodManager
 from .local_music_manager import LocalMusicManager
+from .librespot_recovery import LibrespotRecoveryManager
 
 __all__ = [
     'SleepManager', 'SmoothCarousel', 'PlayTimer', 'PerformanceMonitor', 'AutoPauseManager',
     'SetupMenu', 'Settings', 'UsageTracker', 'BluetoothManager', 'BluetoothDevice',
-    'CheckPodManager', 'LocalMusicManager',
+    'CheckPodManager', 'LocalMusicManager', 'LibrespotRecoveryManager',
 ]
 

@@ -211,10 +211,24 @@ PLAY_TIMER_DELAY = 1.0  # seconds before auto-play
 SYNC_COOLDOWN = 5.0  # Block sync for 5s after play timer fires
 PROGRESS_SAVE_INTERVAL = 10  # Save progress every 10 seconds
 PROGRESS_EXPIRY_HOURS = 96  # Expire saved progress after 96 hours
-CONTEXT_SWITCH_WATCHDOG_TIMEOUT = 60.0  # Hard failsafe for stuck context-switch loading
+CONTEXT_SWITCH_WATCHDOG_TIMEOUT = 25.0  # Hard failsafe for stuck context-switch loading
 STATUS_READY_MAX_AGE = 4.0  # Normal play gate: fresh librespot /status required
 STATUS_READY_WAKE_MAX_AGE = 15.0  # After wake, allow slightly older status snapshot
 STATUS_READY_WAKE_GRACE_SEC = 30.0  # How long after wake the relaxed gate applies
+
+# Librespot hang recovery (auto-restart when API dead but WiFi ok)
+LIBRESPOT_RECOVERY_STATUS_FAIL_THRESHOLD = 8  # consecutive /status failures while disconnected
+LIBRESPOT_RECOVERY_CONTEXT_STALL_SEC = 20.0  # context-switch stuck before restart attempt
+LIBRESPOT_RECOVERY_PLAY_TIMEOUT_WINDOW = 30.0  # sliding window for play/seek timeouts
+LIBRESPOT_RECOVERY_PLAY_TIMEOUT_COUNT = 3  # timeouts in window -> restart
+LIBRESPOT_RECOVERY_COOLDOWN_SEC = 180.0  # min seconds between restarts
+LIBRESPOT_RECOVERY_MAX_PER_HOUR = 3
+LIBRESPOT_RECOVERY_HEALTH_WAIT_SEC = 15.0  # wait for API after restart
+
+# Swipe / play pipeline
+SNAP_PAUSE_SETTLE_SEC = 1.0  # defer remote pause until carousel settled
+MANUAL_PLAY_SUPPRESS_SEC = 3.0  # block focus auto-play after manual play tap
+PLAY_CONTEXT_WAIT_SEC = 5.0  # wait for context commit before seek/resume
 
 # ============================================
 # TOUCH & GESTURES
