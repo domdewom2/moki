@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..config import MPV_SOCKET_PATH, WM8960_SINK
+from ..utils import silence_wm8960_playback, restore_wm8960_output
 
 MPV_AUDIO_DEVICE = f'pipewire/{WM8960_SINK}'
 
@@ -28,11 +29,13 @@ class LocalPlaybackController:
         on_state_changed: Optional[Callable[[], None]] = None,
         on_stopped: Optional[Callable[[str, int, int, str], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        get_speaker_level: Optional[Callable[[], int]] = None,
     ):
         self.mock_mode = mock_mode
         self._on_state_changed = on_state_changed or (lambda: None)
         self._on_stopped = on_stopped or (lambda uri, pos, dur, name: None)
         self._on_error = on_error or (lambda msg: None)
+        self._get_speaker_level = get_speaker_level or (lambda: 100)
         self._lock = threading.Lock()
         self._process: Optional[subprocess.Popen] = None
         self._poll_thread: Optional[threading.Thread] = None
@@ -43,6 +46,7 @@ class LocalPlaybackController:
         self._track_name: str = ''
         self._position_ms: int = 0
         self._duration_ms: int = 0
+        self._is_live_stream: bool = False
         self._mock_timer_start: float = 0.0
         self._mpv_path: Optional[str] = None if mock_mode else shutil.which('mpv')
         self._mpv_unavailable: bool = False
@@ -93,6 +97,11 @@ class LocalPlaybackController:
                 self._track_name,
             )
 
+    @property
+    def is_live_stream(self) -> bool:
+        with self._lock:
+            return self._is_live_stream
+
     def get_live_position_ms(self) -> Optional[int]:
         """Return current position from mpv when available, else cached value."""
         if self.mock_mode:
@@ -119,6 +128,55 @@ class LocalPlaybackController:
             time.sleep(0.1)
         return False
 
+    def _wait_for_stream_ready(self, timeout: float = 20.0) -> bool:
+        """Wait until mpv has started a live HTTP stream."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            idle = self._query_property('idle-active')
+            if idle is False:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def play_stream(self, url: str, context_uri: str, track_name: str) -> bool:
+        """Play a live HTTP stream (no seek/progress persistence)."""
+        if self.mock_mode:
+            with self._lock:
+                self._is_live_stream = True
+            return self._mock_play(context_uri, track_name, 0, 0)
+
+        if not self._ensure_mpv():
+            return False
+
+        self._ensure_speaker_ready()
+        self.stop(save_progress=False)
+
+        ok = self._send_command(['loadfile', url, 'replace'])
+        if not ok:
+            self._on_error('Stream nicht erreichbar')
+            return False
+
+        if not self._wait_for_stream_ready():
+            logger.warning(f'mpv stream not ready: {url}')
+            self._on_error('Stream nicht erreichbar')
+            return False
+
+        self._send_command(['set_property', 'pause', False])
+        time.sleep(0.1)
+
+        with self._lock:
+            self._playing = True
+            self._paused = False
+            self._context_uri = context_uri
+            self._track_name = track_name
+            self._position_ms = 0
+            self._duration_ms = 0
+            self._is_live_stream = True
+        self._start_poll_thread()
+        self._on_state_changed()
+        logger.info(f'Live stream started: {track_name}')
+        return True
+
     def play(
         self,
         path: Path,
@@ -138,7 +196,10 @@ class LocalPlaybackController:
         if not self._ensure_mpv():
             return False
 
+        self._ensure_speaker_ready()
         self.stop(save_progress=False)
+        with self._lock:
+            self._is_live_stream = False
         seek_sec = max(0.0, start_position_ms / 1000.0)
 
         ok = self._send_command(['loadfile', str(path), 'replace'])
@@ -227,6 +288,8 @@ class LocalPlaybackController:
 
     def seek_relative(self, delta_seconds: int) -> bool:
         """Seek by delta_seconds relative to current position."""
+        if self.is_live_stream:
+            return False
         if self.mock_mode:
             with self._lock:
                 if not (self._playing or self._paused):
@@ -248,7 +311,8 @@ class LocalPlaybackController:
 
     def stop(self, save_progress: bool = True):
         playing, paused, position_ms, duration_ms, context_uri, track_name = self.get_state()
-        if save_progress and context_uri and (playing or paused):
+        is_live = self.is_live_stream
+        if save_progress and not is_live and context_uri and (playing or paused):
             live_position = self.get_live_position_ms()
             if live_position is not None:
                 position_ms = live_position
@@ -259,6 +323,16 @@ class LocalPlaybackController:
             if position_ms > 0:
                 self._on_stopped(context_uri, position_ms, duration_ms, track_name)
 
+        # Cut live audio immediately — poll-thread join used to play up to 1s longer.
+        if (
+            not self.mock_mode
+            and is_live
+            and (playing or paused)
+            and self._process
+            and self._process.poll() is None
+        ):
+            self._silence_live_output()
+
         self._poll_stop.set()
         if self._poll_thread and self._poll_thread.is_alive():
             self._poll_thread.join(timeout=1.0)
@@ -266,7 +340,10 @@ class LocalPlaybackController:
         self._poll_stop.clear()
 
         if not self.mock_mode and self._process and self._process.poll() is None:
-            self._send_command(['stop'])
+            if is_live and (playing or paused):
+                self._finish_mpv_live_stop()
+            else:
+                self._send_command(['stop'])
         with self._lock:
             self._playing = False
             self._paused = False
@@ -274,7 +351,35 @@ class LocalPlaybackController:
             self._track_name = ''
             self._position_ms = 0
             self._duration_ms = 0
+            self._is_live_stream = False
         self._on_state_changed()
+
+    def _silence_live_output(self):
+        """Instant silence while mpv is still decoding (software + hardware)."""
+        # Do the software cut first; PipeWire/ALSA changes can take a moment.
+        self._send_commands([
+            ['set_property', 'volume', 0],
+            ['set_property', 'mute', True],
+            ['set_property', 'pause', True],
+        ])
+        silence_wm8960_playback()
+
+    def _finish_mpv_live_stop(self):
+        """Stop mpv after output is already silent; restore volume on next play only."""
+        self._send_command(['stop'])
+        deadline = time.time() + 0.3
+        while time.time() < deadline:
+            if self._query_property('idle-active') is True:
+                break
+            time.sleep(0.02)
+
+    def _ensure_speaker_ready(self):
+        if not self.mock_mode:
+            restore_wm8960_output(self._get_speaker_level())
+            self._send_commands([
+                ['set_property', 'volume', 100],
+                ['set_property', 'mute', False],
+            ])
 
     def shutdown(self):
         self.stop(save_progress=True)
@@ -432,6 +537,21 @@ class LocalPlaybackController:
             logger.warning(f'mpv IPC command failed {command}: {e}')
             return False
 
+    def _send_commands(self, commands: list[list]) -> bool:
+        if self.mock_mode:
+            return True
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            sock.connect(MPV_SOCKET_PATH)
+            payload = ''.join(json.dumps({'command': command}) + '\n' for command in commands)
+            sock.sendall(payload.encode('utf-8'))
+            sock.close()
+            return True
+        except OSError as e:
+            logger.warning(f'mpv IPC commands failed {commands}: {e}')
+            return False
+
     def _query_property(self, name: str):
         if self.mock_mode:
             return None
@@ -481,7 +601,12 @@ class LocalPlaybackController:
             idle_active = self._query_property('idle-active')
             if idle_active is True:
                 playing, paused, position_ms, duration_ms, context_uri, track_name = self.get_state()
-                if context_uri and (playing or paused) and position_ms > 0:
+                if (
+                    context_uri
+                    and (playing or paused)
+                    and position_ms > 0
+                    and not self._is_live_stream
+                ):
                     self._on_stopped(context_uri, position_ms, duration_ms, track_name)
                 with self._lock:
                     had_context = self._context_uri is not None
@@ -491,11 +616,39 @@ class LocalPlaybackController:
                     self._track_name = ''
                     self._position_ms = 0
                     self._duration_ms = 0
+                    self._is_live_stream = False
                 if had_context:
                     logger.info('Local playback ended (mpv idle)')
                 self._on_state_changed()
                 time.sleep(0.5)
                 continue
+
+            with self._lock:
+                is_live = self._is_live_stream
+            if not is_live:
+                eof = self._query_property('eof-reached')
+                if eof is True:
+                    playing, paused, position_ms, duration_ms, context_uri, track_name = self.get_state()
+                    if (
+                        context_uri
+                        and (playing or paused)
+                        and position_ms > 0
+                    ):
+                        self._on_stopped(context_uri, position_ms, duration_ms, track_name)
+                    with self._lock:
+                        had_context = self._context_uri is not None
+                        self._playing = False
+                        self._paused = False
+                        self._context_uri = None
+                        self._track_name = ''
+                        self._position_ms = 0
+                        self._duration_ms = 0
+                        self._is_live_stream = False
+                    if had_context:
+                        logger.info('Local playback ended (eof)')
+                    self._on_state_changed()
+                    time.sleep(0.5)
+                    continue
 
             paused = self._query_property('pause')
             time_pos = self._query_property('time-pos')

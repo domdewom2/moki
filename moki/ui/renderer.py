@@ -12,7 +12,10 @@ import pygame.gfxdraw
 from .helpers import draw_aa_circle
 from .image_cache import ImageCache
 from .context import RenderContext
-from ..models import CatalogItem, MenuState, NowPlaying, AppScreen
+from .home_launcher import (
+    HomeAppEntry, home_page_count, app_center, icon_hit_rect, visible_app_indices,
+)
+from ..models import CatalogItem, MenuState, NowPlaying, AppScreen, VoiceSearchPhase, MokiBotPhase
 from ..utils.wifi_info import format_network_button_label
 from ..config import (
     SCREEN_WIDTH, SCREEN_HEIGHT, COLORS,
@@ -20,7 +23,8 @@ from ..config import (
     TRACK_INFO_X, CAROUSEL_X, CONTROLS_X, CAROUSEL_CENTER_Y,
     BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING, PROGRESS_BAR_WIDTH,
     DEFAULT_VOLUME_LEVELS, HOME_ICON_SIZE, HOME_ICON_HIT_PADDING,
-    PIN_LENGTH, HOME_BTN_Y, RELOAD_BTN_Y, HEADPHONE_BTN_Y, HEADPHONE_BTN_Y_CHECKPOD,
+    PIN_LENGTH, HOME_BTN_Y, MIC_BTN_Y, RELOAD_BTN_Y, HEADPHONE_BTN_Y, HEADPHONE_BTN_Y_CHECKPOD,
+    ASSETS_DIR, MOKIBOT_LOGO_SIZE, MOKIBOT_MIC_INSET,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,27 +39,13 @@ class Renderer:
         image_cache: ImageCache,
         icons: Dict[str, pygame.Surface],
         home_background: Optional[pygame.Surface] = None,
-        home_musik_icon: Optional[pygame.Surface] = None,
-        home_musik_center: Optional[Tuple[int, int]] = None,
-        home_checker_icon: Optional[pygame.Surface] = None,
-        home_checker_center: Optional[Tuple[int, int]] = None,
-        home_local_music_icon: Optional[pygame.Surface] = None,
-        home_local_music_center: Optional[Tuple[int, int]] = None,
-        home_settings_icon: Optional[pygame.Surface] = None,
-        home_settings_center: Optional[Tuple[int, int]] = None,
+        home_apps: Optional[List[HomeAppEntry]] = None,
     ):
         self.screen = screen
         self.image_cache = image_cache
         self.icons = icons
         self._home_background = home_background
-        self._home_musik_icon = home_musik_icon
-        self._home_musik_center = home_musik_center
-        self._home_checker_icon = home_checker_icon
-        self._home_checker_center = home_checker_center
-        self._home_local_music_icon = home_local_music_icon
-        self._home_local_music_center = home_local_music_center
-        self._home_settings_icon = home_settings_icon
-        self._home_settings_center = home_settings_center
+        self._home_apps = home_apps or []
         
         # Fonts
         self.font_large = pygame.font.Font(None, 42)
@@ -78,6 +68,11 @@ class Renderer:
         self._carousel_rect = pygame.Rect(CAROUSEL_X - 50, 0, COVER_SIZE + 100, SCREEN_HEIGHT)
         self._last_playing_state: Optional[bool] = None
         self._last_selected_index: Optional[int] = None
+        self.voice_search_close_rect: Optional[pygame.Rect] = None
+        self.voice_search_mic_rect: Optional[pygame.Rect] = None
+        self.mokibot_home_rect: Optional[pygame.Rect] = None
+        self.mokibot_mic_rect: Optional[pygame.Rect] = None
+        self._mokibot_logo = self._load_mokibot_logo()
         self._last_toast: Optional[str] = None
         
         # Button hit rectangles (updated during draw)
@@ -88,15 +83,31 @@ class Renderer:
         # Menu button rects (updated when menu is drawn)
         self.menu_button_rects: Dict[str, pygame.Rect] = {}
         self.menu_content_overflow: int = 0
-        self.home_musik_rect: Optional[pygame.Rect] = None
-        self.home_checker_rect: Optional[pygame.Rect] = None
-        self.home_local_music_rect: Optional[pygame.Rect] = None
-        self.home_settings_rect: Optional[pygame.Rect] = None
+        self.home_icon_rects: Dict[str, pygame.Rect] = {}
         # Header fade: spans from content_top (transparent) to screen edge (opaque)
-        # Covers the entire title zone so content slides under it smoothly (iOS-style)
         header_fade_size = SCREEN_WIDTH - 615  # 105px, starts just above first button top
         raw = self._build_fade_surface(header_fade_size)
         self._menu_header_fade = pygame.transform.flip(raw, True, False)
+
+    @property
+    def home_musik_rect(self) -> Optional[pygame.Rect]:
+        return self.home_icon_rects.get('musik')
+
+    @property
+    def home_checker_rect(self) -> Optional[pygame.Rect]:
+        return self.home_icon_rects.get('checker')
+
+    @property
+    def home_local_music_rect(self) -> Optional[pygame.Rect]:
+        return self.home_icon_rects.get('local_music')
+
+    @property
+    def home_radio_rect(self) -> Optional[pygame.Rect]:
+        return self.home_icon_rects.get('radio')
+
+    @property
+    def home_settings_rect(self) -> Optional[pygame.Rect]:
+        return self.home_icon_rects.get('settings')
     
     @staticmethod
     def _build_fade_surface(size: int) -> pygame.Surface:
@@ -151,10 +162,7 @@ class Renderer:
             self.add_button_rect = None
             self.delete_button_rect = None
             self.settings_button_rect = None
-            self.home_musik_rect = None
-            self.home_checker_rect = None
-            self.home_local_music_rect = None
-            self.home_settings_rect = None
+            self.home_icon_rects = {}
             self._draw_menu_frame(ctx)
             return None
 
@@ -166,14 +174,31 @@ class Renderer:
             self._draw_home_screen(ctx)
             return None
 
+        # MokiBot voice assistant screen
+        if ctx.app_screen == AppScreen.MOKIBOT:
+            self.add_button_rect = None
+            self.delete_button_rect = None
+            self.settings_button_rect = None
+            self.home_icon_rects = {}
+            self._draw_mokibot_screen(ctx)
+            return None
+
+        # Voice search overlay on Spotify
+        if (
+            ctx.app_screen == AppScreen.SPOTIFY
+            and ctx.voice_search_phase != VoiceSearchPhase.CLOSED
+        ):
+            self.add_button_rect = None
+            self.delete_button_rect = None
+            self.settings_button_rect = None
+            self._draw_voice_search_overlay(ctx)
+            return None
+
         # Clear button hit rects
         self.add_button_rect = None
         self.delete_button_rect = None
         self.settings_button_rect = None
-        self.home_musik_rect = None
-        self.home_checker_rect = None
-        self.home_local_music_rect = None
-        self.home_settings_rect = None
+        self.home_icon_rects = {}
         
         current_item = ctx.items[ctx.selected_index] if ctx.selected_index < len(ctx.items) else None
         current_track_key = self._get_track_key(
@@ -222,6 +247,8 @@ class Renderer:
             # Full redraw
             self._draw_background()
             self._draw_track_info(current_item, ctx)
+            if ctx.app_screen == AppScreen.RADIO and ctx.now_playing.playing:
+                self._draw_radio_live_badge()
             self._draw_controls(
                 ctx.is_playing,
                 ctx.volume_index,
@@ -229,6 +256,10 @@ class Renderer:
                 bt_connected=ctx.bt_connected,
                 bt_audio_active=ctx.bt_audio_active,
                 show_reload=ctx.app_screen in (AppScreen.CHECKPOD, AppScreen.LOCAL_MUSIC),
+                show_mic=(
+                    ctx.app_screen == AppScreen.SPOTIFY
+                    and ctx.voice_search_phase == VoiceSearchPhase.CLOSED
+                ),
             )
             
             if self._static_layer is None:
@@ -483,6 +514,8 @@ class Renderer:
     
     def _draw_cover_progress(self, cover_rect: tuple, item: CatalogItem, now_playing: NowPlaying):
         """Draw progress bar at the edge of the cover (portrait mode - left edge = user's bottom)."""
+        if item.uri.startswith('radio:'):
+            return
         cover_x, cover_y, cover_w, cover_h = cover_rect
         
         if now_playing.context_uri != item.uri:
@@ -534,7 +567,7 @@ class Renderer:
     
     def _draw_controls(self, is_playing: bool, volume_index: int, pressed_button: Optional[str] = None,
                        bt_connected: bool = False, bt_audio_active: bool = False,
-                       show_reload: bool = False):
+                       show_reload: bool = False, show_mic: bool = False):
         """Draw playback control buttons (portrait mode - buttons along Y axis)."""
         x = CONTROLS_X
         center_y = CAROUSEL_CENTER_Y
@@ -548,6 +581,12 @@ class Renderer:
         home_color = self._lighten_color(gray_color) if pressed_button == 'home' else gray_color
         draw_aa_circle(self.screen, home_color, home_center, BTN_SIZE // 2)
         self._draw_icon('home', home_center)
+
+        if show_mic:
+            mic_center = (x, MIC_BTN_Y)
+            mic_color = self._lighten_color(COLORS['accent']) if pressed_button == 'mic' else COLORS['accent']
+            draw_aa_circle(self.screen, mic_color, mic_center, BTN_SIZE // 2)
+            self._draw_icon('mic', mic_center)
 
         if show_reload:
             reload_center = (x, RELOAD_BTN_Y)
@@ -597,6 +636,381 @@ class Renderer:
         if icon:
             rect = icon.get_rect(center=center)
             self.screen.blit(icon, rect)
+
+    def _draw_voice_search_overlay(self, ctx: RenderContext):
+        """Full-screen voice search overlay on Spotify."""
+        self.screen.fill((0, 0, 0))
+        self.voice_search_close_rect = None
+        self.voice_search_mic_rect = None
+        self._needs_full_redraw = True
+
+        nav_center = self._MENU_NAV_CENTER
+        nav_r = self._MENU_NAV_SIZE // 2
+        nav_color = COLORS['bg_elevated']
+        if ctx.pressed_button == 'voice_search_close':
+            nav_color = self._lighten_color(nav_color)
+        draw_aa_circle(self.screen, nav_color, nav_center, nav_r)
+        close_icon = self.icons.get('close')
+        if close_icon:
+            icon_sz = 32
+            scaled = pygame.transform.smoothscale(close_icon, (icon_sz, icon_sz))
+            self.screen.blit(scaled, scaled.get_rect(center=nav_center))
+        self.voice_search_close_rect = pygame.Rect(
+            nav_center[0] - nav_r, nav_center[1] - nav_r,
+            self._MENU_NAV_SIZE, self._MENU_NAV_SIZE,
+        )
+
+        phase = ctx.voice_search_phase
+        cx = SCREEN_WIDTH // 2
+        cy = SCREEN_HEIGHT // 2
+        if phase == VoiceSearchPhase.PREPARING:
+            spinner_size = 140
+            status_surf = self._render_text_rotated(
+                'Mikrofon wird bereit…', self.font_large, COLORS['text_primary'],
+            )
+            gap = 48
+            block_h = spinner_size + gap + status_surf.get_height()
+            block_top = cy - block_h // 2
+            spinner_rect = (
+                cx - spinner_size // 2,
+                block_top,
+                spinner_size,
+                spinner_size,
+            )
+            self._draw_loading_spinner(spinner_rect)
+            self.screen.blit(
+                status_surf,
+                status_surf.get_rect(
+                    center=(cx, block_top + spinner_size + gap + status_surf.get_height() // 2),
+                ),
+            )
+        elif phase == VoiceSearchPhase.COUNTDOWN:
+            self._draw_voice_search_countdown(ctx.voice_search_countdown_label)
+        elif phase == VoiceSearchPhase.RECORDING:
+            pulse = 0.5 + 0.5 * math.sin(time.time() * 4.0)
+            mic_radius = int(BTN_SIZE * (0.9 + 0.15 * pulse))
+            status_surf = self._render_text_rotated(
+                f'Sprich jetzt…  {ctx.voice_search_elapsed}s',
+                self.font_large,
+                COLORS['text_primary'],
+            )
+            gap = 56
+            block_h = mic_radius * 2 + gap + status_surf.get_height()
+            block_top = cy - block_h // 2
+            mic_center = (cx, block_top + mic_radius)
+            mic_color = (
+                int(COLORS['accent'][0] * (0.7 + 0.3 * pulse)),
+                int(COLORS['accent'][1] * (0.7 + 0.3 * pulse)),
+                int(COLORS['accent'][2] * (0.7 + 0.3 * pulse)),
+            )
+            draw_aa_circle(self.screen, mic_color, mic_center, mic_radius)
+            self._draw_icon('mic', mic_center)
+            hit = mic_radius + 40
+            self.voice_search_mic_rect = pygame.Rect(
+                mic_center[0] - hit, mic_center[1] - hit, hit * 2, hit * 2,
+            )
+            self.screen.blit(
+                status_surf,
+                status_surf.get_rect(
+                    center=(
+                        cx,
+                        block_top + mic_radius * 2 + gap + status_surf.get_height() // 2,
+                    ),
+                ),
+            )
+        elif phase == VoiceSearchPhase.TRANSCRIBING:
+            self._draw_voice_search_status('Verstehe…', '')
+        elif phase == VoiceSearchPhase.SEARCHING:
+            query = ctx.voice_search_query.strip()
+            if query:
+                self._draw_voice_search_status('Suche…', query)
+            else:
+                self._draw_voice_search_status('Suche…', '')
+        elif phase == VoiceSearchPhase.RESULTS:
+            query = ctx.voice_search_query.strip() or 'Ergebnisse'
+            items = [
+                CatalogItem(
+                    id=f'voice_search:{i}',
+                    uri=r.uri,
+                    name=r.name,
+                    type=r.type,
+                    artist=r.artist,
+                    image=r.preview_image,
+                )
+                for i, r in enumerate(ctx.voice_search_results)
+            ]
+            if ctx.dragging:
+                drag_index_offset = -ctx.drag_offset / (COVER_SIZE + COVER_SPACING)
+                effective_scroll = ctx.voice_search_selected_index + drag_index_offset
+            else:
+                effective_scroll = ctx.voice_search_scroll_x
+            self._draw_carousel(
+                items,
+                effective_scroll,
+                NowPlaying(),
+                delete_mode_id=None,
+                loading=False,
+                app_screen=AppScreen.SPOTIFY,
+            )
+            title_surf = self._render_voice_search_query_text(query)
+            # Portrait: covers use Y for scroll; user's "below" = lower X (see track info).
+            query_x = CAROUSEL_X - 72
+            self.screen.blit(
+                title_surf,
+                title_surf.get_rect(center=(query_x, CAROUSEL_CENTER_Y)),
+            )
+
+        if ctx.toast_message:
+            self._draw_toast(ctx.toast_message)
+
+    def _load_mokibot_logo(self) -> Optional[pygame.Surface]:
+        path = ASSETS_DIR / 'mokibot.png'
+        if not path.exists():
+            logger.warning(f'MokiBot logo missing: {path}')
+            return None
+        try:
+            img = pygame.image.load(path).convert_alpha()
+            img_rot = pygame.transform.rotate(img, -90)
+            size = MOKIBOT_LOGO_SIZE
+            return pygame.transform.smoothscale(img_rot, (size, size))
+        except Exception as e:
+            logger.warning(f'Failed to load MokiBot logo: {e}')
+            return None
+
+    def _draw_mokibot_screen(self, ctx: 'RenderContext'):
+        """MokiBot voice assistant — logo, status, mic."""
+        self.screen.fill((0, 0, 0))
+        self.mokibot_home_rect = None
+        self.mokibot_mic_rect = None
+        self._needs_full_redraw = True
+
+        nav_center = self._MENU_NAV_CENTER
+        nav_r = self._MENU_NAV_SIZE // 2
+        nav_color = COLORS['bg_elevated']
+        if ctx.pressed_button == 'mokibot_home':
+            nav_color = self._lighten_color(nav_color)
+        draw_aa_circle(self.screen, nav_color, nav_center, nav_r)
+        home_icon = self.icons.get('home')
+        if home_icon:
+            icon_sz = 32
+            scaled = pygame.transform.smoothscale(home_icon, (icon_sz, icon_sz))
+            self.screen.blit(scaled, scaled.get_rect(center=nav_center))
+        self.mokibot_home_rect = pygame.Rect(
+            nav_center[0] - nav_r, nav_center[1] - nav_r,
+            self._MENU_NAV_SIZE, self._MENU_NAV_SIZE,
+        )
+
+        cx = SCREEN_WIDTH // 2
+        phase = ctx.mokibot_phase
+        logo_size = MOKIBOT_LOGO_SIZE
+        logo_y = 150
+        text_gap = 32
+        mic_y = SCREEN_HEIGHT - MOKIBOT_MIC_INSET
+        mic_radius = BTN_SIZE
+        # Portrait layout: logo (top) → text band (middle) → mic (bottom).
+        # On the physical landscape display that reads as logo left, text centre, mic right.
+        logo_bottom = logo_y + logo_size // 2
+        text_zone_top = logo_bottom + 72
+        text_zone_bottom = mic_y - mic_radius - 80
+
+        if self._mokibot_logo:
+            if phase == MokiBotPhase.THINKING:
+                pulse = 0.88 + 0.12 * (0.5 + 0.5 * math.sin(time.time() * 3.5))
+                logo_size = max(1, int(MOKIBOT_LOGO_SIZE * pulse))
+                scaled = pygame.transform.smoothscale(self._mokibot_logo, (logo_size, logo_size))
+            else:
+                scaled = self._mokibot_logo
+            logo_rect = scaled.get_rect(center=(cx, logo_y))
+            self.screen.blit(scaled, logo_rect)
+            logo_bottom = logo_y + logo_size // 2
+            text_zone_top = logo_bottom + 72
+
+        status = ctx.mokibot_status_text.strip()
+        reply = ctx.mokibot_reply_text.strip()
+        show_reply = bool(
+            reply and phase in (MokiBotPhase.SPEAKING, MokiBotPhase.PLAYING, MokiBotPhase.IDLE)
+        )
+
+        status_surf = None
+        if status:
+            status_surf = self._render_wrapped_text_rotated(
+                status, self.font_large, COLORS['text_primary'],
+                max_width=300, max_lines=3,
+            )
+        reply_surf = None
+        if show_reply:
+            reply_surf = self._render_wrapped_text_rotated(
+                reply, self.font_medium, COLORS['text_secondary'],
+                max_width=300, max_lines=3,
+            )
+
+        blocks: List[pygame.Surface] = []
+        if status_surf is not None:
+            blocks.append(status_surf)
+        if reply_surf is not None:
+            blocks.append(reply_surf)
+
+        if blocks:
+            total_text_h = sum(s.get_height() for s in blocks)
+            total_text_h += text_gap * (len(blocks) - 1)
+            zone_h = max(1, text_zone_bottom - text_zone_top)
+            if total_text_h > zone_h:
+                # Prefer keeping text below the logo over filling the zone.
+                total_text_h = zone_h
+            cursor = text_zone_top + max(0, (zone_h - total_text_h) // 2)
+            if status_surf is not None:
+                status_y = cursor + status_surf.get_height() // 2
+                self.screen.blit(status_surf, status_surf.get_rect(center=(cx, status_y)))
+                cursor = status_y + status_surf.get_height() // 2 + text_gap
+            if reply_surf is not None:
+                reply_y = cursor + reply_surf.get_height() // 2
+                self.screen.blit(reply_surf, reply_surf.get_rect(center=(cx, reply_y)))
+
+        mic_center = (cx, mic_y)
+        if phase == MokiBotPhase.RECORDING:
+            pulse = 0.5 + 0.5 * math.sin(time.time() * 4.0)
+            mic_radius = int(BTN_SIZE * (0.9 + 0.15 * pulse))
+            mic_color = (
+                int(COLORS['accent'][0] * (0.7 + 0.3 * pulse)),
+                int(COLORS['accent'][1] * (0.7 + 0.3 * pulse)),
+                int(COLORS['accent'][2] * (0.7 + 0.3 * pulse)),
+            )
+        elif ctx.pressed_button == 'mokibot_mic':
+            mic_radius = BTN_SIZE
+            mic_color = self._lighten_color(COLORS['bg_elevated'])
+        else:
+            mic_radius = BTN_SIZE
+            mic_color = COLORS['bg_elevated']
+
+        if phase == MokiBotPhase.COUNTDOWN:
+            self._draw_voice_search_countdown(ctx.mokibot_countdown_label)
+        elif phase == MokiBotPhase.PREPARING:
+            spinner_size = 100
+            spinner_rect = (
+                cx - spinner_size // 2,
+                mic_center[1] - spinner_size // 2,
+                spinner_size,
+                spinner_size,
+            )
+            self._draw_loading_spinner(spinner_rect)
+        elif phase != MokiBotPhase.THINKING:
+            draw_aa_circle(self.screen, mic_color, mic_center, mic_radius)
+            self._draw_icon('mic', mic_center)
+            hit = mic_radius + 40
+            self.mokibot_mic_rect = pygame.Rect(
+                mic_center[0] - hit, mic_center[1] - hit, hit * 2, hit * 2,
+            )
+
+        if ctx.toast_message:
+            self._draw_toast(ctx.toast_message)
+
+    def _render_wrapped_text_rotated(
+        self,
+        text: str,
+        font: pygame.font.Font,
+        color,
+        *,
+        max_width: int,
+        max_lines: int,
+    ) -> pygame.Surface:
+        """Word-wrap then rotate for portrait display."""
+        words = text.split()
+        lines: List[str] = []
+        current = ''
+        for word in words:
+            trial = f'{current} {word}'.strip()
+            if font.size(trial)[0] <= max_width or not current:
+                current = trial
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            lines[-1] = lines[-1].rstrip('.') + '…'
+        surfaces = [font.render(line, True, color) for line in lines]
+        total_h = sum(s.get_height() for s in surfaces) + max(0, len(surfaces) - 1) * 6
+        max_w = max((s.get_width() for s in surfaces), default=0)
+        block = pygame.Surface((max_w, total_h), pygame.SRCALPHA)
+        y = 0
+        for surf in surfaces:
+            block.blit(surf, (0, y))
+            y += surf.get_height() + 6
+        return pygame.transform.rotate(block, -90)
+
+    def _render_voice_search_query_text(self, text: str) -> pygame.Surface:
+        """Render search query rotated; truncate along user's horizontal (pre-rotate width)."""
+        display = text.strip() or 'Ergebnisse'
+        max_width = COVER_SIZE + 80
+        surface = self.font_large.render(display, True, COLORS['text_primary'])
+        if surface.get_width() > max_width:
+            while len(display) > 3:
+                trial = self.font_large.render(display + '…', True, COLORS['text_primary'])
+                if trial.get_width() <= max_width:
+                    surface = trial
+                    break
+                display = display[:-1]
+            else:
+                surface = self.font_large.render(display + '…', True, COLORS['text_primary'])
+        return pygame.transform.rotate(surface, -90)
+
+    def _draw_voice_search_countdown(self, label: str):
+        """Large centered countdown: 3 red, 2 orange, 1 yellow, OK green."""
+        if not label:
+            return
+        colors = {
+            '3': COLORS['error'],
+            '2': (255, 140, 50),
+            '1': (255, 220, 60),
+            'OK': (96, 210, 120),
+        }
+        color = colors.get(label, COLORS['text_primary'])
+        center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        num_surf = self._render_text_rotated(label, self.font_large, color)
+        scale = 2.8 if label != 'OK' else 2.2
+        num_surf = pygame.transform.smoothscale(
+            num_surf,
+            (
+                max(1, int(num_surf.get_width() * scale)),
+                max(1, int(num_surf.get_height() * scale)),
+            ),
+        )
+        self.screen.blit(num_surf, num_surf.get_rect(center=center))
+
+    def _draw_voice_search_text_stack(
+        self,
+        entries: List[Tuple[str, pygame.font.Font, Tuple[int, int, int]]],
+    ):
+        """Draw rotated text lines centered on screen with spacing from rendered size."""
+        if not entries:
+            return
+        gap = 44
+        surfaces = [
+            self._render_text_rotated(text, font, color)
+            for text, font, color in entries
+        ]
+        total_height = sum(s.get_height() for s in surfaces) + gap * (len(surfaces) - 1)
+        cx = SCREEN_WIDTH // 2
+        cy = SCREEN_HEIGHT // 2
+        top_y = cy - total_height // 2
+        y_cursor = top_y
+        for surf in surfaces:
+            center_y = y_cursor + surf.get_height() // 2
+            self.screen.blit(surf, surf.get_rect(center=(cx, center_y)))
+            y_cursor += surf.get_height() + gap
+
+    def _draw_voice_search_status(self, status: str, query: str):
+        """Center status lines for voice search phases."""
+        entries: List[Tuple[str, pygame.font.Font, Tuple[int, int, int]]] = [
+            (status, self.font_large, COLORS['text_primary']),
+        ]
+        if query:
+            display = query.strip()
+            if len(display) > 50:
+                display = display[:47] + '…'
+            entries.append((f'„{display}"', self.font_medium, COLORS['text_secondary']))
+        self._draw_voice_search_text_stack(entries)
     
     def _draw_overlay_button(self, cover_rect: tuple, icon_name: str, tint: tuple) -> tuple:
         """Draw a tinted icon button on the cover. Returns (x, y, w, h) hit rect."""
@@ -731,12 +1145,9 @@ class Renderer:
     # ============================================
 
     def _draw_home_screen(self, ctx: 'RenderContext'):
-        """Draw the home launcher with background and tappable app icons."""
+        """Draw paginated home launcher (4×2 grid, swipe between pages)."""
         self._needs_full_redraw = True
-        self.home_musik_rect = None
-        self.home_checker_rect = None
-        self.home_local_music_rect = None
-        self.home_settings_rect = None
+        self.home_icon_rects = {}
 
         if self._home_background is not None:
             bg_rect = self._home_background.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
@@ -744,38 +1155,62 @@ class Renderer:
         else:
             self.screen.fill(COLORS['bg_primary'])
 
-        self._draw_home_icon(
-            self._home_musik_icon,
-            self._home_musik_center,
-            'home_musik',
-            ctx.pressed_button,
-            'home_musik_rect',
-        )
-        self._draw_home_icon(
-            self._home_checker_icon,
-            self._home_checker_center,
-            'home_checker',
-            ctx.pressed_button,
-            'home_checker_rect',
-        )
-        self._draw_home_icon(
-            self._home_local_music_icon,
-            self._home_local_music_center,
-            'home_local_music',
-            ctx.pressed_button,
-            'home_local_music_rect',
-        )
-        self._draw_home_icon(
-            self._home_settings_icon,
-            self._home_settings_center,
-            'home_settings',
-            ctx.pressed_button,
-            'home_settings_rect',
-        )
+        apps = self._home_apps
+        if not apps:
+            if ctx.toast_message:
+                self._draw_toast(ctx.toast_message)
+            return
+
+        if ctx.home_dragging:
+            drag_offset = ctx.home_drag_offset
+            page_scroll = ctx.home_page_scroll - drag_offset / SCREEN_HEIGHT
+        else:
+            drag_offset = 0.0
+            page_scroll = ctx.home_page_scroll
+
+        pressed_key = ctx.pressed_button
+        for index in visible_app_indices(len(apps), page_scroll):
+            app = apps[index]
+            if app.icon is None:
+                continue
+            center = app_center(index, page_scroll, drag_offset)
+            if center[1] < -HOME_ICON_SIZE or center[1] > SCREEN_HEIGHT + HOME_ICON_SIZE:
+                continue
+            press_id = f'home_{app.app_id}'
+            self._draw_home_icon_at(app.icon, center, pressed_key == press_id)
+            self.home_icon_rects[app.app_id] = icon_hit_rect(center)
+
+        pages = home_page_count(len(apps))
+        if pages > 1:
+            self._draw_home_page_dots(ctx.home_page_index, pages)
 
         if ctx.toast_message:
             self._draw_toast(ctx.toast_message)
             self._last_toast = ctx.toast_message
+
+    def _draw_home_icon_at(
+        self,
+        icon: pygame.Surface,
+        center: Tuple[int, int],
+        pressed: bool,
+    ):
+        draw_icon = icon
+        if pressed:
+            pressed_size = max(1, int(icon.get_width() * 0.92))
+            draw_icon = pygame.transform.smoothscale(icon, (pressed_size, pressed_size))
+        self.screen.blit(draw_icon, draw_icon.get_rect(center=center))
+
+    def _draw_home_page_dots(self, active_page: int, page_count: int):
+        """Page indicator dots (user's bottom = low X on screen)."""
+        dot_r = 6
+        gap = 18
+        total_w = page_count * (dot_r * 2) + (page_count - 1) * gap
+        start_y = SCREEN_HEIGHT // 2 - total_w // 2 + dot_r
+        x = 48
+        for page in range(page_count):
+            center = (x, start_y + page * (dot_r * 2 + gap))
+            color = COLORS['text_primary'] if page == active_page else COLORS['text_muted']
+            pygame.draw.circle(self.screen, color, center, dot_r)
 
     def _draw_home_icon(
         self,
@@ -785,22 +1220,17 @@ class Renderer:
         pressed_button: Optional[str],
         rect_attr: str,
     ):
+        """Legacy helper — kept for compatibility with older call sites."""
         if icon is None or center is None:
             return
+        self._draw_home_icon_at(icon, center, pressed_button == pressed_key)
+        setattr(self, rect_attr, icon_hit_rect(center))
 
-        draw_icon = icon
-        if pressed_button == pressed_key:
-            pressed_size = max(1, int(icon.get_width() * 0.92))
-            draw_icon = pygame.transform.smoothscale(icon, (pressed_size, pressed_size))
-
-        icon_rect = draw_icon.get_rect(center=center)
-        self.screen.blit(draw_icon, icon_rect)
-
-        pad = HOME_ICON_HIT_PADDING
-        hit_size = HOME_ICON_SIZE + pad * 2
-        hit_rect = pygame.Rect(0, 0, hit_size, hit_size)
-        hit_rect.center = center
-        setattr(self, rect_attr, hit_rect)
+    def _draw_radio_live_badge(self):
+        """Small green Live label below the cover (user's bottom = lower X)."""
+        label = self._render_text_rotated('Live', self.font_medium, (96, 210, 120))
+        query_x = CAROUSEL_X - 72
+        self.screen.blit(label, label.get_rect(center=(query_x, CAROUSEL_CENTER_Y)))
     
     # ============================================
     # SETUP MENU
@@ -826,6 +1256,16 @@ class Renderer:
     ]
     _PIN_KEYPAD_BTN = 72
     _PIN_KEYPAD_GAP = 12
+
+    _MUSIC_SEARCH_KEYPAD_BTN = 52
+    _MUSIC_SEARCH_KEYPAD_GAP = 6
+    # Wide rows along physical Y (= user's landscape horizontal, 1280px)
+    _MUSIC_SEARCH_KEYBOARD_ROWS = [
+        ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'],
+        ['l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v'],
+        ['w', 'x', 'y', 'z', 'ä', 'ö', 'ü', 'ß'],
+        ['space', 'back', 'go'],
+    ]
 
     _VOL_LABELS = [
         ('speaker', ['Speaker low', 'Speaker mid', 'Speaker high']),
@@ -875,10 +1315,16 @@ class Renderer:
             title = 'Sprachtest'
             nav_icon = 'back'
             items = self._build_voice_test_content(ctx)
+        elif ctx.menu_state == MenuState.MUSIC_SEARCH:
+            self._draw_music_search_screen(ctx)
+        elif ctx.menu_state == MenuState.MUSIC_SEARCH_RESULTS:
+            title = 'Ergebnisse'
+            nav_icon = 'back'
+            items = self._build_music_search_results_content(ctx)
         else:
             return
 
-        if ctx.menu_state in (MenuState.PIN_ENTRY, MenuState.CHANGE_PIN):
+        if ctx.menu_state in (MenuState.PIN_ENTRY, MenuState.CHANGE_PIN, MenuState.MUSIC_SEARCH):
             return
 
         H = self._MENU_BTN_H
@@ -919,6 +1365,7 @@ class Renderer:
             ('button', 'bluetooth', 'Bluetooth', COLORS['bg_elevated']),
             ('button', 'volume', 'Volume levels', COLORS['bg_elevated']),
             ('button', 'voice_test', 'Sprachtest', COLORS['bg_elevated']),
+            ('button', 'music_search', 'Musik suchen', COLORS['bg_elevated']),
             ('separator',),
             ('button', 'auto_pause', f'Auto-pause: {ctx.auto_pause_minutes} min', COLORS['bg_elevated']),
             ('button', 'progress_expiry', f'Remember: {ctx.progress_expiry_hours} hrs', COLORS['bg_elevated']),
@@ -944,17 +1391,44 @@ class Renderer:
             items.append(('footer', f'Version: {ctx.app_version_label}'))
         return items
 
+    def _split_transcript_lines(self, text: str, max_len: int = 40) -> list:
+        """Split transcript into scrollable menu lines."""
+        words = text.split()
+        if not words:
+            return [text]
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f'{current} {word}'
+            if len(candidate) <= max_len:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
     def _build_voice_test_content(self, ctx: 'RenderContext') -> list:
+        voice_transcript = getattr(ctx, 'voice_transcript', None)
+        voice_transcribing = getattr(ctx, 'voice_transcribing', False)
+        voice_transcribe_error = getattr(ctx, 'voice_transcribe_error', None)
+
         if ctx.voice_recording:
             status = f'Aufnahme… {ctx.voice_recording_elapsed}s'
         elif ctx.voice_preparing:
             status = 'Vorbereiten…'
         elif ctx.voice_encoding:
             status = 'Speichern…'
+        elif voice_transcribing:
+            status = 'Transkribiere…'
         elif ctx.voice_playing:
             status = 'Wiedergabe…'
+        elif voice_transcribe_error:
+            status = voice_transcribe_error
+        elif voice_transcript:
+            status = 'Erkannt:'
         elif ctx.voice_has_recording:
-            status = 'Bereit — tippe Abspielen'
+            status = 'Bereit — Abspielen oder Text'
         else:
             status = 'Noch keine Aufnahme'
 
@@ -962,12 +1436,135 @@ class Renderer:
             ('text', status),
             ('spacer',),
         ]
+
+        if voice_transcript and not voice_transcribing:
+            for line in self._split_transcript_lines(voice_transcript):
+                items.append(('text', line))
+            items.append(('spacer',))
+
         if ctx.voice_recording:
             items.append(('button', 'voice_record', 'Stop', COLORS['error']))
-        elif not ctx.voice_encoding and not ctx.voice_preparing:
+        elif not ctx.voice_encoding and not ctx.voice_preparing and not voice_transcribing:
             items.append(('button', 'voice_record', 'Aufnehmen', COLORS['accent']))
-        if ctx.voice_has_recording and not ctx.voice_recording and not ctx.voice_encoding and not ctx.voice_preparing:
+        if (
+            ctx.voice_has_recording
+            and not ctx.voice_recording
+            and not ctx.voice_encoding
+            and not ctx.voice_preparing
+            and not voice_transcribing
+        ):
             items.append(('button', 'voice_play', 'Abspielen', COLORS['bg_elevated']))
+            label = 'Nochmal' if voice_transcribe_error else 'In Text umwandeln'
+            items.append(('button', 'voice_transcribe', label, COLORS['bg_elevated']))
+        return items
+
+    def _draw_music_search_screen(self, ctx: 'RenderContext'):
+        """Draw music search: query on top, wide keyboard below (landscape-friendly)."""
+        nav_center = self._MENU_NAV_CENTER
+        nav_r = self._MENU_NAV_SIZE // 2
+        nav_color = COLORS['bg_elevated']
+        if ctx.pressed_button == 'menu_close':
+            nav_color = self._lighten_color(nav_color)
+        draw_aa_circle(self.screen, nav_color, nav_center, nav_r)
+        nav_icon_img = self.icons.get('back')
+        if nav_icon_img:
+            icon_sz = 32
+            scaled = pygame.transform.smoothscale(nav_icon_img, (icon_sz, icon_sz))
+            self.screen.blit(scaled, scaled.get_rect(center=nav_center))
+        self.menu_button_rects['close'] = pygame.Rect(
+            nav_center[0] - nav_r, nav_center[1] - nav_r,
+            self._MENU_NAV_SIZE, self._MENU_NAV_SIZE,
+        )
+
+        title_surf = self._render_text_rotated('Musik suchen', self.font_large, COLORS['text_primary'])
+        self.screen.blit(title_surf, title_surf.get_rect(center=(self._MENU_TITLE_X, CAROUSEL_CENTER_Y)))
+
+        query = ctx.search_query.strip()
+        if query:
+            display = query if len(query) <= 40 else query[:38] + '…'
+            query_color = COLORS['text_primary']
+            query_font = self.font_large
+        else:
+            display = 'Tippe deine Suche…'
+            query_color = COLORS['text_muted']
+            query_font = self.font_medium
+
+        # Query above keyboard (high physical X = user's top area)
+        query_x = 590
+        query_surf = self._render_text_rotated(display, query_font, query_color)
+        query_center = (query_x, CAROUSEL_CENTER_Y)
+        self.screen.blit(query_surf, query_surf.get_rect(center=query_center))
+        line_half = min(320, max(80, query_surf.get_height() // 2 + 16))
+        pygame.draw.line(
+            self.screen, COLORS['text_muted'],
+            (query_x - 18, query_center[1] - line_half),
+            (query_x - 18, query_center[1] + line_half), 2,
+        )
+
+        btn = self._MUSIC_SEARCH_KEYPAD_BTN
+        gap = self._MUSIC_SEARCH_KEYPAD_GAP
+        rows = self._MUSIC_SEARCH_KEYBOARD_ROWS
+        max_cols = max(len(row) for row in rows)
+        grid_w = btn * max_cols + gap * (max_cols - 1)
+        grid_h = btn * len(rows) + gap * (len(rows) - 1)
+        # Keyboard in lower half (low physical X) — uses full landscape width
+        grid_center_x = 195
+        grid_center_y = CAROUSEL_CENTER_Y
+        grid_origin_x = grid_center_x + grid_h // 2
+        grid_origin_y = grid_center_y - grid_w // 2
+
+        labels = {'space': '␣', 'back': '⌫', 'go': 'OK'}
+        for row_idx, row in enumerate(rows):
+            col_offset = (max_cols - len(row)) // 2
+            for col_idx, key in enumerate(row):
+                rect = pygame.Rect(
+                    grid_origin_x - row_idx * (btn + gap) - btn,
+                    grid_origin_y + (col_idx + col_offset) * (btn + gap),
+                    btn,
+                    btn,
+                )
+                if key in ('space', 'back', 'go'):
+                    btn_id = f'search_{key}'
+                    label = labels[key]
+                    bg = COLORS['accent'] if key == 'go' else COLORS['bg_elevated']
+                else:
+                    btn_id = f'search_key_{key}'
+                    label = key.upper()
+                    bg = COLORS['bg_elevated']
+                if ctx.pressed_button == btn_id:
+                    bg = self._lighten_color(bg)
+                self._draw_menu_button(rect, label, bg)
+                self.menu_button_rects[btn_id] = rect
+
+        self._needs_full_redraw = True
+
+    def _build_music_search_results_content(self, ctx: 'RenderContext') -> list:
+        query = ctx.search_query.strip()
+        if query:
+            header = query if len(query) <= 32 else query[:30] + '…'
+            items = [('header', f'"{header}"')]
+        else:
+            items = []
+
+        if ctx.search_loading:
+            items.append(('text', 'Suche läuft…'))
+            return items
+
+        if ctx.search_error:
+            items.append(('text', ctx.search_error))
+            items.append(('button', 'search_retry', 'Nochmal versuchen', COLORS['accent']))
+            return items
+
+        if not ctx.search_results:
+            items.append(('text', 'Keine Treffer'))
+            items.append(('button', 'search_retry', 'Nochmal suchen', COLORS['bg_elevated']))
+            return items
+
+        for i, result in enumerate(ctx.search_results):
+            type_label = 'Album' if result.type == 'album' else 'Playlist'
+            name = result.name if len(result.name) <= 28 else result.name[:26] + '…'
+            label = f'{name} · {type_label}'
+            items.append(('button', f'search_result_{i}', label, COLORS['bg_elevated']))
         return items
 
     def _draw_pin_screen(self, ctx: 'RenderContext', title: str, subtitle: str):

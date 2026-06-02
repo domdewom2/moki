@@ -16,7 +16,11 @@ from typing import Optional, List, Dict
 
 import pygame
 
-from ..config import COLORS, COVER_SIZE, COVER_SIZE_SMALL, IMAGE_CACHE_MAX_SIZE, CHECKPOD_IMAGES_DIR, LOCAL_MUSIC_IMAGES_DIR
+from ..config import (
+    ASSETS_DIR, COLORS, COVER_SIZE, COVER_SIZE_SMALL, IMAGE_CACHE_MAX_SIZE,
+    CHECKPOD_IMAGES_DIR, LOCAL_MUSIC_IMAGES_DIR, SEARCH_CACHE_DIR,
+    SEARCH_CACHE_PATH_PREFIX, RADIO_IMAGE_PATH_PREFIX,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,27 @@ class ImageCache:
             logger.warning(f'Local music image not found: {base}{suffix}.png')
             return None
 
+        if image_path.startswith(RADIO_IMAGE_PATH_PREFIX):
+            asset_name = image_path.replace(RADIO_IMAGE_PATH_PREFIX, '')
+            source = ASSETS_DIR / f'radio-{asset_name}.png'
+            if not source.exists():
+                logger.warning(f'Radio asset not found: {source.name}')
+                return None
+            return source
+
+        if image_path.startswith(SEARCH_CACHE_PATH_PREFIX):
+            filename = image_path.replace(SEARCH_CACHE_PATH_PREFIX, '')
+            base = filename.replace('.png', '').replace('.jpg', '')
+            if size == COVER_SIZE_SMALL:
+                suffix = '_small_dim' if dimmed else '_small'
+            else:
+                suffix = '_dim' if dimmed else ''
+            variant_path = SEARCH_CACHE_DIR / f'{base}{suffix}.png'
+            if variant_path.exists():
+                return variant_path
+            logger.warning(f'Search cache image not found: {base}{suffix}.png')
+            return None
+
         if not image_path.startswith('/images/'):
             return None
         
@@ -137,6 +162,20 @@ class ImageCache:
         logger.warning(f'Image not found: {base}{suffix}.png')
         return None
     
+    def _load_scaled_surface(self, path: Path, size: int, cache_key: str) -> pygame.Surface:
+        """Load an asset, rotate for portrait display, and scale to cover size."""
+        try:
+            surface = pygame.image.load(str(path)).convert_alpha()
+            surface = pygame.transform.rotate(surface, -90)  # -90 = 90° CW
+            if surface.get_width() != size or surface.get_height() != size:
+                surface = pygame.transform.smoothscale(surface, (size, size))
+            self.cache[cache_key] = surface
+            self._access_times[cache_key] = time.time()
+            return surface
+        except Exception as e:
+            logger.debug(f'Failed to load scaled {path}: {e}')
+            return self.get_placeholder(size)
+
     def _load_surface(self, path: Path, cache_key: str) -> pygame.Surface:
         """Load pre-rotated image directly with pygame (fast, no rotation needed)."""
         try:
@@ -180,6 +219,8 @@ class ImageCache:
         variant_path = self._get_variant_path(image_path, size, dimmed=False)
         
         if variant_path:
+            if image_path.startswith(RADIO_IMAGE_PATH_PREFIX):
+                return self._load_scaled_surface(variant_path, size, cache_key)
             return self._load_surface(variant_path, cache_key)
         
         # URL images or missing files
@@ -206,6 +247,13 @@ class ImageCache:
         variant_path = self._get_variant_path(image_path, size, dimmed=True)
         
         if variant_path:
+            if image_path.startswith(RADIO_IMAGE_PATH_PREFIX):
+                scaled = self.get(image_path, size)
+                dimmed_surf = scaled.copy()
+                dimmed_surf.fill((96, 96, 96, 255), special_flags=pygame.BLEND_RGBA_MULT)
+                self.cache[cache_key] = dimmed_surf
+                self._access_times[cache_key] = time.time()
+                return dimmed_surf
             return self._load_surface(variant_path, cache_key)
         
         return self.get_placeholder(size)

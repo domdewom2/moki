@@ -14,17 +14,22 @@ logger = logging.getLogger(__name__)
 GRAPHQL_URL = 'https://api.ardaudiothek.de/graphql'
 
 EPISODES_QUERY = """
-query CheckPodEpisodes($id: ID!, $count: Int!) {
+query CheckPodEpisodes($id: ID!, $count: Int!, $after: Cursor) {
   result: programSet(id: $id) {
     title
     items(
       first: $count
+      after: $after
       orderBy: PUBLISH_DATE_DESC
       filter: {
         isPublished: { equalTo: true }
         itemType: { notEqualTo: EVENT_LIVESTREAM }
       }
     ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         id
         title
@@ -54,6 +59,14 @@ class ArdEpisode:
         return f'urn:ard:episode:{self.id}'
 
 
+@dataclass
+class ArdEpisodePage:
+    """One page of episodes from ARD GraphQL pagination."""
+    episodes: List[ArdEpisode]
+    has_next_page: bool
+    end_cursor: Optional[str]
+
+
 def _pick_mp3_url(audios: list) -> Optional[str]:
     """Return the MP3 stream URL from ARD audio variants."""
     if not audios:
@@ -69,6 +82,22 @@ def _normalize_image_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
     return url.replace('{width}', '800')
+
+
+def parse_episode_page(data: dict) -> ArdEpisodePage:
+    """Parse GraphQL response into episodes plus pagination info."""
+    result = (data or {}).get('data', {}).get('result')
+    if not result:
+        return ArdEpisodePage(episodes=[], has_next_page=False, end_cursor=None)
+
+    items = result.get('items') or {}
+    page_info = items.get('pageInfo') or {}
+    episodes = parse_episodes({'data': {'result': {'items': {'nodes': items.get('nodes') or []}}}})
+    return ArdEpisodePage(
+        episodes=episodes,
+        has_next_page=bool(page_info.get('hasNextPage')),
+        end_cursor=page_info.get('endCursor'),
+    )
 
 
 def parse_episodes(data: dict) -> List[ArdEpisode]:
@@ -101,15 +130,19 @@ def parse_episodes(data: dict) -> List[ArdEpisode]:
     return episodes
 
 
-def fetch_episodes(
+def fetch_episodes_page(
     show_id: str = CHECKPOD_ARD_SHOW_ID,
     limit: int = CHECKPOD_EPISODE_LIMIT,
+    after: Optional[str] = None,
     timeout: float = 15.0,
-) -> List[ArdEpisode]:
-    """Fetch latest published episodes for an ARD show."""
+) -> ArdEpisodePage:
+    """Fetch one page of published episodes (newest first)."""
+    variables = {'id': show_id, 'count': limit}
+    if after:
+        variables['after'] = after
     payload = {
         'query': EPISODES_QUERY,
-        'variables': {'id': show_id, 'count': limit},
+        'variables': variables,
     }
     try:
         resp = requests.post(GRAPHQL_URL, json=payload, timeout=timeout)
@@ -117,9 +150,21 @@ def fetch_episodes(
         body = resp.json()
         if body.get('errors'):
             logger.warning(f'ARD GraphQL errors: {body["errors"]}')
-        episodes = parse_episodes(body)
-        logger.info(f'ARD fetched {len(episodes)} episodes for show {show_id}')
-        return episodes
+        page = parse_episode_page(body)
+        logger.info(
+            f'ARD fetched {len(page.episodes)} episodes for show {show_id} '
+            f'(after={"set" if after else "none"}, has_next={page.has_next_page})'
+        )
+        return page
     except requests.RequestException as e:
         logger.warning(f'ARD fetch failed: {e}', exc_info=True)
-        return []
+        return ArdEpisodePage(episodes=[], has_next_page=False, end_cursor=None)
+
+
+def fetch_episodes(
+    show_id: str = CHECKPOD_ARD_SHOW_ID,
+    limit: int = CHECKPOD_EPISODE_LIMIT,
+    timeout: float = 15.0,
+) -> List[ArdEpisode]:
+    """Fetch latest published episodes for an ARD show (first page only)."""
+    return fetch_episodes_page(show_id=show_id, limit=limit, timeout=timeout).episodes

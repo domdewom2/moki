@@ -34,6 +34,14 @@ SCREEN_HEIGHT = 1280
 LIBRESPOT_URL = os.environ.get('LIBRESPOT_URL', 'http://localhost:3678')
 LIBRESPOT_WS = os.environ.get('LIBRESPOT_WS', 'ws://localhost:3678/events')
 
+MOKI_SEARCH_URL = os.environ.get('MOKI_SEARCH_URL', 'https://api.mokikids.de/search')
+MOKI_SEARCH_LIMIT = int(os.environ.get('MOKI_SEARCH_LIMIT', '8'))
+MOKI_SEARCH_TYPES = os.environ.get('MOKI_SEARCH_TYPES', 'album,playlist')
+
+MOKI_TRANSCRIBE_URL = os.environ.get('MOKI_TRANSCRIBE_URL', 'https://api.mokikids.de/transcribe')
+MOKI_TRANSCRIBE_LANGUAGE = os.environ.get('MOKI_TRANSCRIBE_LANGUAGE', 'de')
+MOKI_TRANSCRIBE_TIMEOUT = int(os.environ.get('MOKI_TRANSCRIBE_TIMEOUT', '60'))
+
 # ============================================
 # PATHS
 # ============================================
@@ -115,7 +123,8 @@ BTN_SPACING = (COVER_SIZE - BTN_SIZE) // 2  # 155px
 # Control column Y positions (portrait mode, matches renderer)
 HOME_BTN_Y = CAROUSEL_CENTER_Y - (COVER_SIZE + COVER_SPACING) - COVER_SIZE_SMALL // 2 + BTN_SIZE // 2
 RELOAD_BTN_Y = HOME_BTN_Y + BTN_SIZE + 20
-HEADPHONE_BTN_Y = RELOAD_BTN_Y  # Spotify
+MIC_BTN_Y = RELOAD_BTN_Y  # Spotify voice search (between home and prev)
+HEADPHONE_BTN_Y = MIC_BTN_Y + BTN_SIZE + 20  # Spotify — below mic
 HEADPHONE_BTN_Y_CHECKPOD = RELOAD_BTN_Y + BTN_SIZE + 20  # below reload on local media apps
 
 # Progress bar (now vertical on physical screen)
@@ -125,15 +134,35 @@ PROGRESS_BAR_WIDTH = 8
 # HOME SCREEN
 # ============================================
 
-# Home icon position in physical screen coords (see config layout comments).
-# Small X = user's bottom, large X = user's top; Y = user's horizontal axis.
-HOME_ICON_SIZE = 196  # 30% smaller than original 280
+# Home icon grid (portrait coords: Y = user's horizontal, X = user's vertical).
+HOME_APPS_PER_PAGE = 8
+HOME_GRID_COLS = 4
+HOME_GRID_ROWS = 2
+HOME_ICON_SIZE = 146
+HOME_ICON_GAP_Y = 36   # between columns along user's horizontal (1280px axis)
+HOME_ICON_GAP_X = 36   # between rows along user's vertical (720px axis)
+HOME_ICON_HIT_PADDING = 16
+# Legacy single-column positions (unused — grid layout in home_launcher.py)
 HOME_ICON_SCREEN_X_FRAC = 0.32
-HOME_CHECKER_ICON_SCREEN_Y_FRAC = 0.25
-HOME_LOCAL_MUSIC_ICON_SCREEN_Y_FRAC = 0.42
-HOME_ICON_SCREEN_Y_FRAC = 0.59
-HOME_SETTINGS_ICON_SCREEN_Y_FRAC = 0.76
-HOME_ICON_HIT_PADDING = 20
+HOME_MUSIK_ICON_SCREEN_Y_FRAC = 0.18
+HOME_CHECKER_ICON_SCREEN_Y_FRAC = 0.32
+HOME_LOCAL_MUSIC_ICON_SCREEN_Y_FRAC = 0.46
+HOME_RADIO_ICON_SCREEN_Y_FRAC = 0.60
+HOME_SETTINGS_ICON_SCREEN_Y_FRAC = 0.74
+HOME_ICON_SCREEN_Y_FRAC = HOME_MUSIK_ICON_SCREEN_Y_FRAC
+
+# ============================================
+# RADIO TEDDY (Webradio live stream)
+# ============================================
+
+RADIO_TEDDY_CHANNEL_ID = '54abff23-d488-4c8c-bec4-8b961e8f172f'
+RADIO_TEDDY_STREAM_URL = (
+    f'https://radio-teddy.api.radiosphere.io/channels/{RADIO_TEDDY_CHANNEL_ID}/stream.mp3'
+)
+RADIO_TEDDY_CONTEXT_URI = 'radio:teddy:live'
+RADIO_TEDDY_NAME = 'Radio TEDDY'
+RADIO_IMAGE_PATH_PREFIX = '/radio/assets/'
+RADIO_TEDDY_IMAGE_PATH = f'{RADIO_IMAGE_PATH_PREFIX}teddy'
 
 # Admin PIN for settings app (4 digits, stored in settings.json)
 PIN_LENGTH = 4
@@ -149,6 +178,7 @@ CHECKPOD_CATALOG_PATH = CHECKPOD_CACHE_DIR / 'catalog.json'
 CHECKPOD_PROGRESS_PATH = CHECKPOD_CACHE_DIR / 'progress.json'
 CHECKPOD_IMAGES_DIR = CHECKPOD_CACHE_DIR / 'images'
 CHECKPOD_EPISODE_LIMIT = 30
+CHECKPOD_LOAD_MORE_THRESHOLD = 2
 CHECKPOD_IMAGE_PATH_PREFIX = '/checkpod/images/'
 CHECKPOD_DOWNLOAD_RETENTION_DAYS = 7
 MPV_SOCKET_PATH = '/tmp/moki-mpv.sock'
@@ -169,6 +199,34 @@ LOCAL_MUSIC_IMAGE_PATH_PREFIX = '/local_music/images/'
 
 VOICE_TEST_DIR = DATA_DIR / 'voice_test'
 VOICE_TEST_LAST_PATH = VOICE_TEST_DIR / 'last.mp3'
+VOICE_SEARCH_DIR = DATA_DIR / 'voice_search'
+VOICE_SEARCH_LAST_PATH = VOICE_SEARCH_DIR / 'last.mp3'
+SEARCH_CACHE_DIR = DATA_DIR / 'search_cache'
+SEARCH_CACHE_PATH_PREFIX = '/search_cache/'
+VOICE_SEARCH_MAX_SECONDS = 20  # short queries — smaller MP3, faster Whisper
+VOICE_SEARCH_RESULT_LIMIT = 8
+VOICE_SEARCH_MP3_BITRATE = 64
+VOICE_SEARCH_API_CONNECT_TIMEOUT = 5
+VOICE_SEARCH_API_READ_TIMEOUT = 20
+VOICE_SEARCH_API_PROBE_MAX_WAIT = 10
+VOICE_SEARCH_COUNTDOWN_SECONDS = 4  # 3, 2, 1, OK — one second each
+
+MOKI_ASSISTANT_URL = os.environ.get('MOKI_ASSISTANT_URL', 'https://api.mokikids.de/assistant')
+MOKI_ASSISTANT_HEALTH_URL = os.environ.get(
+    'MOKI_ASSISTANT_HEALTH_URL', 'https://api.mokikids.de/assistant/health',
+)
+MOKI_ASSISTANT_READ_TIMEOUT = int(os.environ.get('MOKI_ASSISTANT_READ_TIMEOUT', '25'))
+MOKI_ASSISTANT_TIMEOUT = (VOICE_SEARCH_API_CONNECT_TIMEOUT, MOKI_ASSISTANT_READ_TIMEOUT)
+MOKIBOT_DIR = DATA_DIR / 'mokibot'
+MOKIBOT_RECORD_PATH = MOKIBOT_DIR / 'last.mp3'
+MOKIBOT_TTS_PATH = MOKIBOT_DIR / 'tts_last.mp3'
+MOKIBOT_TTS_CONTEXT_URI = 'moki:mokibot:tts'
+MOKIBOT_CONTEXT_APP = 'mokibot'
+MOKIBOT_TIMEZONE = os.environ.get('MOKIBOT_TIMEZONE', 'Europe/Berlin')
+MOKIBOT_MAX_SECONDS = VOICE_SEARCH_MAX_SECONDS
+MOKIBOT_LOGO_SIZE = 220
+MOKIBOT_MIC_INSET = 175  # portrait px from bottom edge → inset from right on landscape display
+
 VOICE_TEST_MAX_SECONDS = 120
 VOICE_TEST_SAMPLE_RATE = 44100
 VOICE_TEST_MP3_BITRATE = 128
@@ -224,6 +282,8 @@ LIBRESPOT_RECOVERY_PLAY_TIMEOUT_COUNT = 3  # timeouts in window -> restart
 LIBRESPOT_RECOVERY_COOLDOWN_SEC = 180.0  # min seconds between restarts
 LIBRESPOT_RECOVERY_MAX_PER_HOUR = 3
 LIBRESPOT_RECOVERY_HEALTH_WAIT_SEC = 15.0  # wait for API after restart
+LIBRESPOT_RECOVERY_WIFI_SUPPRESS_SEC = 45.0  # pause recovery during WiFi reconnect
+LIBRESPOT_RECOVERY_WIFI_AP_SUPPRESS_SEC = 120.0  # wifi-connect AP can take longer
 
 # Swipe / play pipeline
 SNAP_PAUSE_SETTLE_SEC = 1.0  # defer remote pause until carousel settled

@@ -20,7 +20,7 @@ pygame_stub.font = SimpleNamespace(Font=object)
 sys.modules.setdefault('pygame', pygame_stub)
 sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
-from moki.api.ard_audiothek import parse_episodes
+from moki.api.ard_audiothek import parse_episodes, parse_episode_page, ArdEpisode, ArdEpisodePage
 from moki.app import Moki
 from moki.models import AppScreen, CatalogItem, NowPlaying
 from moki.managers.checkpod_manager import (
@@ -55,6 +55,120 @@ SAMPLE_GRAPHQL_RESPONSE = {
         }
     }
 }
+
+
+SAMPLE_PAGE_RESPONSE = {
+    'data': {
+        'result': {
+            'items': {
+                'pageInfo': {
+                    'hasNextPage': True,
+                    'endCursor': 'cursor-abc',
+                },
+                'nodes': SAMPLE_GRAPHQL_RESPONSE['data']['result']['items']['nodes'],
+            }
+        }
+    }
+}
+
+
+def test_parse_episode_page_includes_pagination():
+    page = parse_episode_page(SAMPLE_PAGE_RESPONSE)
+    assert len(page.episodes) == 1
+    assert page.has_next_page is True
+    assert page.end_cursor == 'cursor-abc'
+
+
+def test_checkpod_load_more_appends_episodes(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    catalog_path = cache_dir / 'catalog.json'
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+
+    page1 = ArdEpisodePage(
+        episodes=[ArdEpisode(
+            id='1', title='Neu', audio_url='https://example.com/1.mp3',
+            image_url=None, duration_ms=1000,
+        )],
+        has_next_page=True,
+        end_cursor='cursor-1',
+    )
+    page2 = ArdEpisodePage(
+        episodes=[ArdEpisode(
+            id='2', title='Alt', audio_url='https://example.com/2.mp3',
+            image_url=None, duration_ms=1000,
+        )],
+        has_next_page=False,
+        end_cursor=None,
+    )
+
+    manager = CheckPodManager()
+    with patch('moki.managers.checkpod_manager.fetch_episodes_page', return_value=page1):
+        assert manager.refresh_episodes() is True
+    assert len(manager.items) == 1
+    assert manager.has_more_episodes is True
+
+    with patch('moki.managers.checkpod_manager.fetch_episodes_page', return_value=page2) as mock_fetch:
+        assert manager.load_more_episodes() is True
+        mock_fetch.assert_called_once_with(after='cursor-1')
+
+    assert len(manager.items) == 2
+    assert manager.items[1].id == '2'
+    assert manager.has_more_episodes is False
+
+
+def test_checkpod_refresh_merge_front_keeps_older_tail(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    catalog_path = cache_dir / 'catalog.json'
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+
+    page1 = ArdEpisodePage(
+        episodes=[ArdEpisode(
+            id='1', title='Neu', audio_url='https://example.com/1.mp3',
+            image_url=None, duration_ms=1000,
+        )],
+        has_next_page=True,
+        end_cursor='cursor-1',
+    )
+    page2 = ArdEpisodePage(
+        episodes=[ArdEpisode(
+            id='2', title='Alt', audio_url='https://example.com/2.mp3',
+            image_url=None, duration_ms=1000,
+        )],
+        has_next_page=False,
+        end_cursor=None,
+    )
+    refreshed_page1 = ArdEpisodePage(
+        episodes=[ArdEpisode(
+            id='1', title='Neu (aktualisiert)', audio_url='https://example.com/1.mp3',
+            image_url=None, duration_ms=1000,
+        )],
+        has_next_page=True,
+        end_cursor='cursor-1',
+    )
+
+    manager = CheckPodManager()
+    with patch('moki.managers.checkpod_manager.fetch_episodes_page', return_value=page1):
+        assert manager.refresh_episodes() is True
+    with patch('moki.managers.checkpod_manager.fetch_episodes_page', return_value=page2) as mock_fetch:
+        assert manager.load_more_episodes() is True
+        mock_fetch.assert_called_once_with(after='cursor-1')
+
+    assert len(manager.items) == 2
+    assert manager.items[1].id == '2'
+
+    with patch('moki.managers.checkpod_manager.fetch_episodes_page', return_value=refreshed_page1):
+        assert manager.refresh_episodes() is True
+
+    assert len(manager.items) == 2
+    assert manager.items[0].name == 'Neu (aktualisiert)'
+    assert manager.items[1].id == '2'
+    assert manager.has_more_episodes is False
 
 
 def test_fit_cover_to_square_preserves_full_image():

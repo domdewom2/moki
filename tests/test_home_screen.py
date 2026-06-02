@@ -99,28 +99,39 @@ def test_home_musik_tap_returns_to_spotify():
     app = Moki.__new__(Moki)
     app._pressed_button = 'home_musik'
     app.renderer = SimpleNamespace(
-        home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: p == (100, 100)),
+        _home_apps=[],
         invalidate=MagicMock(),
     )
-    app._open_spotify_screen = MagicMock()
+    app._home_touch = MagicMock()
+    app._home_touch.long_press_fired = False
+    app._home_touch.on_up = MagicMock(return_value=('tap', 0))
+    app._home_touch_active = True
+    app._home_touch.drag_offset = 0
+    app.home_pager = SimpleNamespace(scroll_x=0.0, max_index=0, set_target=MagicMock())
+    app._home_icon_at_pos = MagicMock(return_value='musik')
+    app._open_home_app = MagicMock()
 
     app._handle_home_touch_up((100, 100))
 
-    app._open_spotify_screen.assert_called_once()
+    app._open_home_app.assert_called_once_with('musik')
 
 
 def test_home_musik_tap_outside_icon_does_not_navigate():
     app = Moki.__new__(Moki)
     app._pressed_button = 'home_musik'
-    app.renderer = SimpleNamespace(
-        home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        invalidate=MagicMock(),
-    )
-    app._open_spotify_screen = MagicMock()
+    app.renderer = SimpleNamespace(_home_apps=[], invalidate=MagicMock())
+    app._home_touch = MagicMock()
+    app._home_touch.long_press_fired = False
+    app._home_touch.on_up = MagicMock(return_value=('tap', 0))
+    app._home_touch_active = True
+    app._home_touch.drag_offset = 0
+    app.home_pager = SimpleNamespace(scroll_x=0.0, max_index=0, set_target=MagicMock())
+    app._home_icon_at_pos = MagicMock(return_value=None)
+    app._open_home_app = MagicMock()
 
     app._handle_home_touch_up((5, 5))
 
-    app._open_spotify_screen.assert_not_called()
+    app._open_home_app.assert_not_called()
 
 
 def test_open_spotify_screen_sets_launch_lock():
@@ -170,13 +181,10 @@ def test_home_touch_down_highlights_checker_icon():
     app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(is_open=False)
     app.app_screen = AppScreen.HOME
-    app.renderer = SimpleNamespace(
-        home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: p == (80, 80)),
-        home_local_music_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        home_settings_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        invalidate=MagicMock(),
-    )
+    app.renderer = SimpleNamespace(invalidate=MagicMock(), _home_apps=[])
+    app._home_touch = MagicMock()
+    app._home_touch_active = False
+    app._home_icon_at_pos = MagicMock(return_value='checker')
     app._user_activated_playback = False
 
     app._handle_touch_down((80, 80))
@@ -189,13 +197,10 @@ def test_home_touch_down_highlights_settings_icon():
     app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(is_open=False)
     app.app_screen = AppScreen.HOME
-    app.renderer = SimpleNamespace(
-        home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        home_local_music_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        home_settings_rect=types.SimpleNamespace(collidepoint=lambda p: p == (90, 90)),
-        invalidate=MagicMock(),
-    )
+    app.renderer = SimpleNamespace(invalidate=MagicMock(), _home_apps=[])
+    app._home_touch = MagicMock()
+    app._home_touch_active = False
+    app._home_icon_at_pos = MagicMock(return_value='settings')
     app._user_activated_playback = False
 
     app._handle_touch_down((90, 90))
@@ -207,15 +212,19 @@ def test_home_touch_down_highlights_settings_icon():
 def test_home_settings_tap_opens_pin_entry():
     app = Moki.__new__(Moki)
     app._pressed_button = 'home_settings'
-    app.renderer = SimpleNamespace(
-        home_settings_rect=types.SimpleNamespace(collidepoint=lambda p: p == (100, 100)),
-        invalidate=MagicMock(),
-    )
-    app._open_settings_with_pin = MagicMock()
+    app.renderer = SimpleNamespace(_home_apps=[], invalidate=MagicMock())
+    app._home_touch = MagicMock()
+    app._home_touch.long_press_fired = False
+    app._home_touch.on_up = MagicMock(return_value=('tap', 0))
+    app._home_touch_active = True
+    app._home_touch.drag_offset = 0
+    app.home_pager = SimpleNamespace(scroll_x=0.0, max_index=0, set_target=MagicMock())
+    app._home_icon_at_pos = MagicMock(return_value='settings')
+    app._open_home_app = MagicMock()
 
     app._handle_home_touch_up((100, 100))
 
-    app._open_settings_with_pin.assert_called_once()
+    app._open_home_app.assert_called_once_with('settings')
 
 
 def test_open_settings_with_pin_pauses_playback():
@@ -234,12 +243,10 @@ def test_home_touch_down_highlights_musik_icon():
     app = Moki.__new__(Moki)
     app.setup_menu = SimpleNamespace(is_open=False)
     app.app_screen = AppScreen.HOME
-    app.renderer = SimpleNamespace(
-        home_musik_rect=types.SimpleNamespace(collidepoint=lambda p: p == (50, 50)),
-        home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        home_local_music_rect=types.SimpleNamespace(collidepoint=lambda p: False),
-        invalidate=MagicMock(),
-    )
+    app.renderer = SimpleNamespace(invalidate=MagicMock(), _home_apps=[])
+    app._home_touch = MagicMock()
+    app._home_touch_active = False
+    app._home_icon_at_pos = MagicMock(return_value='musik')
     app._user_activated_playback = False
 
     app._handle_touch_down((50, 50))

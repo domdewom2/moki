@@ -18,6 +18,8 @@ class MenuState(Enum):
     BT_LIST = auto()
     VOLUME_LEVELS = auto()
     VOICE_TEST = auto()
+    MUSIC_SEARCH = auto()
+    MUSIC_SEARCH_RESULTS = auto()
 
 
 class AppScreen(Enum):
@@ -26,6 +28,30 @@ class AppScreen(Enum):
     HOME = auto()
     CHECKPOD = auto()
     LOCAL_MUSIC = auto()
+    RADIO = auto()
+    MOKIBOT = auto()
+
+
+class MokiBotPhase(Enum):
+    """MokiBot voice assistant screen states."""
+    IDLE = auto()
+    PREPARING = auto()
+    COUNTDOWN = auto()
+    RECORDING = auto()
+    THINKING = auto()
+    SPEAKING = auto()
+    PLAYING = auto()
+
+
+class VoiceSearchPhase(Enum):
+    """Spotify voice search overlay states."""
+    CLOSED = auto()
+    PREPARING = auto()
+    COUNTDOWN = auto()
+    RECORDING = auto()
+    TRANSCRIBING = auto()
+    SEARCHING = auto()
+    RESULTS = auto()
 
 
 @dataclass
@@ -73,6 +99,30 @@ class LibrespotStatus:
             duration=track.get('duration', 0),
             repeat_context=bool(data.get('repeat_context', False)),
         )
+
+
+@dataclass
+class SearchResult:
+    """Normalized album or playlist from Moki search API."""
+    uri: str
+    name: str
+    artist: str
+    type: str  # 'album' or 'playlist'
+    image_url: Optional[str] = None
+    preview_image: Optional[str] = None  # local /search_cache/ path after prefetch
+    is_playable: bool = True
+
+
+@dataclass
+class AssistantResponse:
+    """Parsed response from POST /assistant."""
+    action: str  # play, clarify, reject, error
+    session_id: Optional[str]
+    transcript: str
+    reply_text: str
+    reply_audio_url: Optional[str]
+    reply_audio_mime: Optional[str]
+    play: Optional[SearchResult] = None
 
 
 @dataclass

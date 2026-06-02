@@ -52,6 +52,12 @@ class SetupMenu:
         on_leave_voice_test: Optional[Callable[[], None]] = None,
         on_voice_record_toggle: Optional[Callable[[], None]] = None,
         on_voice_play: Optional[Callable[[], None]] = None,
+        on_voice_transcribe: Optional[Callable[[], None]] = None,
+        on_enter_music_search: Optional[Callable[[], None]] = None,
+        on_music_search_key: Optional[Callable[[str], None]] = None,
+        on_music_search_submit: Optional[Callable[[], None]] = None,
+        on_music_search_result: Optional[Callable[[int], None]] = None,
+        on_suppress_librespot_recovery: Optional[Callable[[float, str], None]] = None,
     ):
         self.catalog_manager = catalog_manager
         self.settings = settings
@@ -66,6 +72,12 @@ class SetupMenu:
         self._on_leave_voice_test = on_leave_voice_test or (lambda: None)
         self._on_voice_record_toggle = on_voice_record_toggle or (lambda: None)
         self._on_voice_play = on_voice_play or (lambda: None)
+        self._on_voice_transcribe = on_voice_transcribe or (lambda: None)
+        self._on_enter_music_search = on_enter_music_search or (lambda: None)
+        self._on_music_search_key = on_music_search_key or (lambda _key: None)
+        self._on_music_search_submit = on_music_search_submit or (lambda: None)
+        self._on_music_search_result = on_music_search_result or (lambda _idx: None)
+        self._on_suppress_librespot_recovery = on_suppress_librespot_recovery or (lambda _s, _r: None)
 
         self.state = MenuState.CLOSED
         self.scroll_offset: int = 0  # pixels scrolled in current menu screen
@@ -185,7 +197,17 @@ class SetupMenu:
                 self.scroll_offset = 0
                 self._on_invalidate()
             else:
-                # All other submenus → back to main
+                # All other submenus → back to main (or previous search step)
+                if self.state == MenuState.MUSIC_SEARCH_RESULTS:
+                    self.state = MenuState.MUSIC_SEARCH
+                    self.scroll_offset = 0
+                    self._on_invalidate()
+                    return
+                if self.state == MenuState.MUSIC_SEARCH:
+                    self.state = MenuState.MAIN
+                    self.scroll_offset = 0
+                    self._on_invalidate()
+                    return
                 if self.state == MenuState.BT_LIST and self.bluetooth:
                     self.bluetooth.stop_scan()
                 if self.state == MenuState.VOICE_TEST:
@@ -203,6 +225,10 @@ class SetupMenu:
             self._handle_volume_tap(button_rects, x, y)
         elif self.state == MenuState.VOICE_TEST:
             self._handle_voice_test_tap(button_rects, x, y)
+        elif self.state == MenuState.MUSIC_SEARCH:
+            self._handle_music_search_tap(button_rects, x, y)
+        elif self.state == MenuState.MUSIC_SEARCH_RESULTS:
+            self._handle_music_search_results_tap(button_rects, x, y)
         elif self.state == MenuState.BT_LIST:
             self._handle_bt_tap(button_rects, x, y)
         elif self.state == MenuState.WIFI_LIST:
@@ -277,6 +303,11 @@ class SetupMenu:
             elif 'voice_test' in button_rects and button_rects['voice_test'].collidepoint(x, y):
                 self._on_enter_voice_test()
                 self.state = MenuState.VOICE_TEST
+                self.scroll_offset = 0
+                self._on_invalidate()
+            elif 'music_search' in button_rects and button_rects['music_search'].collidepoint(x, y):
+                self._on_enter_music_search()
+                self.state = MenuState.MUSIC_SEARCH
                 self.scroll_offset = 0
                 self._on_invalidate()
             elif 'change_pin' in button_rects and button_rects['change_pin'].collidepoint(x, y):
@@ -505,6 +536,40 @@ class SetupMenu:
         if 'voice_play' in button_rects and button_rects['voice_play'].collidepoint(x, y):
             self._on_voice_play()
             self._on_invalidate()
+            return
+        if 'voice_transcribe' in button_rects and button_rects['voice_transcribe'].collidepoint(x, y):
+            self._on_voice_transcribe()
+            self._on_invalidate()
+
+    def _handle_music_search_tap(self, button_rects: dict, x: int, y: int):
+        for key, rect in button_rects.items():
+            if not rect.collidepoint(x, y):
+                continue
+            if key == 'search_go':
+                self._on_music_search_submit()
+                return
+            if key == 'search_space':
+                self._on_music_search_key('space')
+                self._on_invalidate()
+                return
+            if key == 'search_back':
+                self._on_music_search_key('back')
+                self._on_invalidate()
+                return
+            if key.startswith('search_key_'):
+                self._on_music_search_key(key[len('search_key_'):])
+                self._on_invalidate()
+                return
+
+    def _handle_music_search_results_tap(self, button_rects: dict, x: int, y: int):
+        if 'search_retry' in button_rects and button_rects['search_retry'].collidepoint(x, y):
+            self._on_music_search_submit()
+            return
+        for key, rect in button_rects.items():
+            if key.startswith('search_result_') and rect.collidepoint(x, y):
+                idx = int(key.split('_')[-1])
+                self._on_music_search_result(idx)
+                return
 
     def _show_bt_screen(self):
         logger.info('Setup menu: Bluetooth screen')
@@ -540,6 +605,17 @@ class SetupMenu:
                     dev = discovered[idx]
                     self.bluetooth.pair_and_connect(dev.mac, dev.name)
                 break
+
+    def _notify_wifi_reconnect_started(self, reason: str, seconds: Optional[float] = None):
+        """Tell the app to pause librespot recovery while the link is flapping."""
+        from ..config import (
+            LIBRESPOT_RECOVERY_WIFI_AP_SUPPRESS_SEC,
+            LIBRESPOT_RECOVERY_WIFI_SUPPRESS_SEC,
+        )
+        duration = seconds if seconds is not None else LIBRESPOT_RECOVERY_WIFI_SUPPRESS_SEC
+        if reason == 'wifi_ap_setup':
+            duration = max(duration, LIBRESPOT_RECOVERY_WIFI_AP_SUPPRESS_SEC)
+        self._on_suppress_librespot_recovery(duration, reason)
 
     def _check_reconnect_tap(self, button_rects: dict, x: int, y: int):
         for key, rect in button_rects.items():
@@ -648,6 +724,7 @@ class SetupMenu:
         self._on_invalidate()
 
         def _reconnect():
+            self._notify_wifi_reconnect_started('wifi_band_change')
             try:
                 subprocess.run(
                     ['sudo', 'nmcli', 'con', 'up', con_name],
@@ -756,6 +833,7 @@ class SetupMenu:
         threading.Thread(target=_prepare_and_launch, daemon=True).start()
 
     def _launch_wifi_connect(self):
+        self._notify_wifi_reconnect_started('wifi_ap_setup')
         try:
             self._wifi_process = subprocess.Popen(
                 ['sudo', 'wifi-connect',
@@ -827,6 +905,7 @@ class SetupMenu:
             ssid = self.known_networks[0]
             con_name = self._ssid_to_con_name.get(ssid, ssid)
             logger.info(f'Auto-reconnecting to known network: {ssid} (con: {con_name})')
+            self._notify_wifi_reconnect_started('wifi_auto_reconnect')
             try:
                 self._force_wifi_24ghz(con_name)
                 subprocess.Popen(
@@ -842,6 +921,7 @@ class SetupMenu:
     def _reconnect_wifi(self, ssid: str):
         con_name = self._ssid_to_con_name.get(ssid, ssid)
         logger.info(f'Setup menu: Reconnect to {ssid} (con: {con_name})')
+        self._notify_wifi_reconnect_started('wifi_manual_reconnect')
 
         if self._wifi_process:
             self._kill_wifi_processes()

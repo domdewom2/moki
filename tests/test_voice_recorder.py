@@ -26,7 +26,6 @@ from moki.ui.renderer import Renderer
 @pytest.fixture
 def voice_paths(tmp_path, monkeypatch):
     out = tmp_path / 'voice_test' / 'last.mp3'
-    monkeypatch.setattr('moki.controllers.voice_recorder.VOICE_TEST_DIR', out.parent)
     monkeypatch.setattr('moki.controllers.voice_recorder.VOICE_TEST_LAST_PATH', out)
     monkeypatch.setattr('moki.controllers.voice_recorder.VOICE_TEST_MAX_SECONDS', 3)
     return out
@@ -38,13 +37,19 @@ class TestVoiceRecorderController:
         assert rec.has_recording() is False
 
     def test_mock_record_and_stop(self, voice_paths):
-        rec = VoiceRecorderController(mock_mode=True, output_path=voice_paths)
+        completed = []
+        rec = VoiceRecorderController(
+            mock_mode=True,
+            output_path=voice_paths,
+            on_recording_complete=lambda: completed.append(None),
+        )
         assert rec.begin_recording() is True
         assert rec.is_recording is True
         assert rec.stop_recording() is True
         time.sleep(0.05)
         assert rec.is_encoding is False
         assert rec.has_recording() is True
+        assert completed == [None]
 
     def test_auto_stop_at_max_duration(self, voice_paths):
         rec = VoiceRecorderController(mock_mode=True, output_path=voice_paths)
@@ -157,9 +162,67 @@ class TestVoiceTestMenu:
             voice_playing=False,
             voice_has_recording=False,
             voice_recording_elapsed=0,
+            voice_transcript=None,
+            voice_transcribing=False,
+            voice_transcribe_error=None,
         )
         items = Renderer._build_voice_test_content(renderer, ctx)
         texts = [item[1] for item in items if item[0] == 'text']
         buttons = [item[1] for item in items if item[0] == 'button']
         assert any('Vorbereiten' in t for t in texts)
         assert 'voice_record' not in buttons
+
+    def test_voice_test_shows_transcribe_button(self):
+        renderer = Renderer.__new__(Renderer)
+        ctx = SimpleNamespace(
+            voice_recording=False,
+            voice_preparing=False,
+            voice_encoding=False,
+            voice_playing=False,
+            voice_has_recording=True,
+            voice_recording_elapsed=0,
+            voice_transcript=None,
+            voice_transcribing=False,
+            voice_transcribe_error=None,
+        )
+        items = Renderer._build_voice_test_content(renderer, ctx)
+        button_ids = [item[1] for item in items if item[0] == 'button']
+        assert 'voice_transcribe' in button_ids
+        assert 'voice_play' in button_ids
+
+    def test_voice_test_transcribing_state(self):
+        renderer = Renderer.__new__(Renderer)
+        ctx = SimpleNamespace(
+            voice_recording=False,
+            voice_preparing=False,
+            voice_encoding=False,
+            voice_playing=False,
+            voice_has_recording=True,
+            voice_recording_elapsed=0,
+            voice_transcript=None,
+            voice_transcribing=True,
+            voice_transcribe_error=None,
+        )
+        items = Renderer._build_voice_test_content(renderer, ctx)
+        texts = [item[1] for item in items if item[0] == 'text']
+        buttons = [item[1] for item in items if item[0] == 'button']
+        assert any('Transkribiere' in t for t in texts)
+        assert 'voice_transcribe' not in buttons
+
+    def test_voice_test_shows_transcript(self):
+        renderer = Renderer.__new__(Renderer)
+        ctx = SimpleNamespace(
+            voice_recording=False,
+            voice_preparing=False,
+            voice_encoding=False,
+            voice_playing=False,
+            voice_has_recording=True,
+            voice_recording_elapsed=0,
+            voice_transcript='stitch hörspiel bitte',
+            voice_transcribing=False,
+            voice_transcribe_error=None,
+        )
+        items = Renderer._build_voice_test_content(renderer, ctx)
+        texts = [item[1] for item in items if item[0] == 'text']
+        assert any('Erkannt' in t for t in texts)
+        assert 'stitch hörspiel bitte' in texts

@@ -134,6 +134,54 @@ def prepare_wm8960_capture():
     logger.info('WM8960 capture levels set for voice test')
 
 
+def duck_wm8960_output():
+    """Silence WM8960 instantly (ALSA + PipeWire) before cutting mpv live streams."""
+    if sys.platform != 'linux':
+        return
+    set_system_volume(0)
+    if shutil.which('pactl'):
+        try:
+            subprocess.run(
+                ['pactl', 'set-sink-volume', WM8960_SINK, '0'],
+                capture_output=True, check=True, timeout=2,
+            )
+        except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
+            logger.debug(f'PipeWire duck failed: {e}')
+
+
+def restore_wm8960_output(speaker_level: int):
+    """Restore WM8960 output level after silence_wm8960_playback()."""
+    if sys.platform != 'linux':
+        return
+    if shutil.which('pactl'):
+        for cmd in (
+            ['pactl', 'set-sink-mute', WM8960_SINK, '0'],
+            ['pactl', 'set-sink-volume', WM8960_SINK, f'{speaker_level}%'],
+        ):
+            try:
+                subprocess.run(cmd, capture_output=True, check=True, timeout=2)
+            except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
+                logger.debug(f'PipeWire restore step failed ({cmd[1]}): {e}')
+    set_system_volume(speaker_level)
+
+
+def silence_wm8960_playback():
+    """Silence speaker for stream stop — no sink suspend (that caused a loud blip)."""
+    if sys.platform != 'linux':
+        return
+    card = _find_wm8960_card()
+    _amixer_set(card, 'set', 'Speaker', '0%')
+    if shutil.which('pactl'):
+        for cmd in (
+            ['pactl', 'set-sink-mute', WM8960_SINK, '1'],
+            ['pactl', 'set-sink-volume', WM8960_SINK, '0'],
+        ):
+            try:
+                subprocess.run(cmd, capture_output=True, check=True, timeout=2)
+            except (subprocess.SubprocessError, subprocess.TimeoutExpired) as e:
+                logger.debug(f'PipeWire silence step failed ({cmd[1]}): {e}')
+
+
 def mute_wm8960_output():
     """Silence speaker output via ALSA and PipeWire before recording."""
     if sys.platform != 'linux':

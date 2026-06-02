@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..config import (
-    VOICE_TEST_DIR,
     VOICE_TEST_LAST_PATH,
     VOICE_TEST_MAX_SECONDS,
     VOICE_TEST_MP3_BITRATE,
@@ -46,14 +45,24 @@ class VoiceRecorderController:
         get_speaker_level: Optional[Callable[[], int]] = None,
         on_before_record: Optional[Callable[[], None]] = None,
         should_restore_output: Optional[Callable[[], bool]] = None,
+        on_recording_complete: Optional[Callable[[], None]] = None,
+        on_capture_ready: Optional[Callable[[], None]] = None,
+        auto_start_capture: bool = True,
+        max_seconds: int = VOICE_TEST_MAX_SECONDS,
+        mp3_bitrate: int = VOICE_TEST_MP3_BITRATE,
     ):
         self.mock_mode = mock_mode
         self.output_path = output_path
+        self._max_seconds = max_seconds
+        self._mp3_bitrate = mp3_bitrate
+        self._auto_start_capture = auto_start_capture
+        self._on_capture_ready = on_capture_ready or (lambda: None)
         self._on_state_changed = on_state_changed or (lambda: None)
         self._on_error = on_error or (lambda msg: None)
         self._get_speaker_level = get_speaker_level or (lambda: 88)
         self._on_before_record = on_before_record or (lambda: None)
         self._should_restore_output = should_restore_output or (lambda: True)
+        self._on_recording_complete = on_recording_complete or (lambda: None)
         self._lock = threading.Lock()
         self._arecord_proc: Optional[subprocess.Popen] = None
         self._recording = False
@@ -63,6 +72,9 @@ class VoiceRecorderController:
         self._encode_thread: Optional[threading.Thread] = None
         self._start_thread: Optional[threading.Thread] = None
         self._speaker_level_saved: int = 88
+        self._awaiting_capture = False
+        self._pending_temp_wav: Optional[Path] = None
+        self._pending_device: Optional[str] = None
 
     @property
     def is_recording(self) -> bool:
@@ -96,7 +108,7 @@ class VoiceRecorderController:
         """Auto-stop when max duration reached."""
         if not self.is_recording:
             return
-        if self.recording_elapsed >= VOICE_TEST_MAX_SECONDS:
+        if self.recording_elapsed >= self._max_seconds:
             logger.info('Voice test: max duration reached, stopping')
             self.stop_recording()
 
@@ -110,6 +122,13 @@ class VoiceRecorderController:
     def begin_recording(self) -> bool:
         """Show preparing state immediately, run capture setup in background."""
         if self.mock_mode:
+            if not self._auto_start_capture:
+                with self._lock:
+                    self._preparing = False
+                    self._awaiting_capture = True
+                self._notify()
+                self._on_capture_ready()
+                return True
             with self._lock:
                 self._recording = True
                 self._recording_started_at = time.time()
@@ -152,7 +171,7 @@ class VoiceRecorderController:
         self._cleanup_stale_processes()
         self._on_before_record()
 
-        VOICE_TEST_DIR.mkdir(parents=True, exist_ok=True)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
         temp_wav = self.output_path.with_suffix('.wav.tmp')
         temp_out = self.output_path.with_suffix('.mp3.tmp')
         for path in (temp_wav, temp_out):
@@ -165,6 +184,49 @@ class VoiceRecorderController:
         time.sleep(CAPTURE_SETTLE_SECONDS)
 
         device = get_wm8960_capture_device()
+
+        if not self._auto_start_capture:
+            with self._lock:
+                self._preparing = False
+                self._awaiting_capture = True
+                self._pending_temp_wav = temp_wav
+                self._pending_device = device
+            logger.info(f'Voice capture ready (device={device}), awaiting countdown')
+            self._notify()
+            self._on_capture_ready()
+            return True
+
+        if not self._launch_arecord(temp_wav, device):
+            if self._should_restore_output():
+                unmute_wm8960_output(self._speaker_level_saved)
+            return False
+        return True
+
+    def start_capture(self) -> bool:
+        """Start arecord after mic is prepared (used for voice-search countdown)."""
+        with self._lock:
+            if not self._awaiting_capture or self._recording:
+                return False
+            temp_wav = self._pending_temp_wav
+            device = self._pending_device
+            self._awaiting_capture = False
+            self._pending_temp_wav = None
+            self._pending_device = None
+
+        if self.mock_mode:
+            with self._lock:
+                self._recording = True
+                self._recording_started_at = time.time()
+            logger.info('Voice test recording started (mock)')
+            self._notify()
+            return True
+
+        if not temp_wav or not device:
+            self._on_error('Aufnahme fehlgeschlagen')
+            return False
+        return self._launch_arecord(temp_wav, device)
+
+    def _launch_arecord(self, temp_wav: Path, device: str) -> bool:
         arecord = None
         last_err = ''
         for attempt in range(ARECORD_BUSY_RETRIES):
@@ -187,8 +249,6 @@ class VoiceRecorderController:
                 logger.warning(f'Voice test arecord attempt {attempt + 1} failed: {e}')
                 time.sleep(0.3)
         if arecord is None:
-            if self._should_restore_output():
-                unmute_wm8960_output(self._speaker_level_saved)
             logger.warning(f'Voice test start failed: {last_err}', exc_info=True)
             self._on_error('Aufnahme fehlgeschlagen')
             return False
@@ -213,11 +273,12 @@ class VoiceRecorderController:
             self._encoding = True
 
         if self.mock_mode:
-            VOICE_TEST_DIR.mkdir(parents=True, exist_ok=True)
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
             self.output_path.write_bytes(b'mock-mp3')
             with self._lock:
                 self._encoding = False
             self._notify()
+            self._on_recording_complete()
             return True
 
         logger.info('Voice test stopping')
@@ -247,7 +308,7 @@ class VoiceRecorderController:
                 result = subprocess.run(
                     [
                         'lame',
-                        '-b', str(VOICE_TEST_MP3_BITRATE),
+                        '-b', str(self._mp3_bitrate),
                         '-q', str(VOICE_TEST_LAME_QUALITY),
                         '--noreplaygain',
                         str(temp_wav),
@@ -268,6 +329,7 @@ class VoiceRecorderController:
                 if temp_out.exists() and temp_out.stat().st_size > 0:
                     temp_out.replace(self.output_path)
                     logger.info(f'Voice test saved {self.output_path}')
+                    self._on_recording_complete()
                 else:
                     self._on_error('Aufnahme leer oder fehlgeschlagen')
             except (OSError, subprocess.SubprocessError) as e:
@@ -295,6 +357,9 @@ class VoiceRecorderController:
             self._recording = False
             self._encoding = False
             self._preparing = False
+            self._awaiting_capture = False
+            self._pending_temp_wav = None
+            self._pending_device = None
         temp_wav = self.output_path.with_suffix('.wav.tmp')
         temp_out = self.output_path.with_suffix('.mp3.tmp')
         self._stop_arecord(arecord, force=True)

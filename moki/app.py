@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, List
 
 import pygame
+import requests
 
 from .config import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
@@ -19,7 +20,7 @@ from .config import (
     MOCK_MODE,
     COVER_SIZE, COVER_SIZE_SMALL, COVER_SPACING,
     CAROUSEL_X, CAROUSEL_CENTER_Y, CONTROLS_X, BTN_SIZE, PLAY_BTN_SIZE, BTN_SPACING,
-    HOME_BTN_Y, RELOAD_BTN_Y, HEADPHONE_BTN_Y, HEADPHONE_BTN_Y_CHECKPOD,
+    HOME_BTN_Y, RELOAD_BTN_Y, MIC_BTN_Y, HEADPHONE_BTN_Y, HEADPHONE_BTN_Y_CHECKPOD,
     CAROUSEL_TOUCH_MARGIN, MAX_SWIPE_JUMP, VELOCITY_THRESHOLDS,
     ACTION_DEBOUNCE, BUTTON_PRESS_DURATION, MENU_HOLD_TIME,
     CONTEXT_SWITCH_WATCHDOG_TIMEOUT,
@@ -28,17 +29,33 @@ from .config import (
     STATUS_READY_WAKE_MAX_AGE,
     STATUS_READY_WAKE_GRACE_SEC,
     LIBRESPOT_RECOVERY_CONTEXT_STALL_SEC,
+    LIBRESPOT_RECOVERY_WIFI_SUPPRESS_SEC,
     SNAP_PAUSE_SETTLE_SEC,
     MANUAL_PLAY_SUPPRESS_SEC,
     POSTHOG_API_KEY, POSTHOG_HOST, ANALYTICS_DISTINCT_ID,
     ANALYTICS_INCLUDE_CONTENT, ANALYTICS_USE_MACHINE_ID,
     HOME_ICON_SIZE, HOME_ICON_SCREEN_X_FRAC, HOME_ICON_SCREEN_Y_FRAC,
     HOME_CHECKER_ICON_SCREEN_Y_FRAC, HOME_LOCAL_MUSIC_ICON_SCREEN_Y_FRAC,
-    HOME_SETTINGS_ICON_SCREEN_Y_FRAC, MPV_SOCKET_PATH,
-    VOICE_TEST_LAST_PATH, VOICE_TEST_PLAYBACK_SPEAKER_BOOST,
+    HOME_RADIO_ICON_SCREEN_Y_FRAC, HOME_SETTINGS_ICON_SCREEN_Y_FRAC, MPV_SOCKET_PATH,
+    RADIO_TEDDY_STREAM_URL, RADIO_TEDDY_CONTEXT_URI, RADIO_TEDDY_NAME, RADIO_TEDDY_IMAGE_PATH,
+    VOICE_TEST_LAST_PATH, VOICE_SEARCH_LAST_PATH, VOICE_TEST_PLAYBACK_SPEAKER_BOOST,
+    VOICE_SEARCH_MAX_SECONDS, VOICE_SEARCH_RESULT_LIMIT, VOICE_SEARCH_MP3_BITRATE,
+    VOICE_SEARCH_API_PROBE_MAX_WAIT, VOICE_SEARCH_API_READ_TIMEOUT,
+    VOICE_SEARCH_API_CONNECT_TIMEOUT,
+    VOICE_SEARCH_COUNTDOWN_SECONDS,
+    MOKIBOT_DIR, MOKIBOT_RECORD_PATH, MOKIBOT_TTS_PATH, MOKIBOT_TTS_CONTEXT_URI,
+    MOKIBOT_MAX_SECONDS,
+    CHECKPOD_LOAD_MORE_THRESHOLD,
 )
-from .models import CatalogItem, NowPlaying, LibrespotStatus, MenuState, AppScreen
+from .models import (
+    CatalogItem, NowPlaying, LibrespotStatus, MenuState, AppScreen, SearchResult,
+    VoiceSearchPhase, MokiBotPhase, AssistantResponse,
+)
 from .api import LibrespotAPI, NullLibrespotAPI, CatalogManager
+from .api import moki_search
+from .api import moki_transcribe
+from .api import moki_assistant
+from .api.search_covers import prefetch_covers, prefetch_covers_incremental
 from .handlers import TouchHandler, EventListener, EvdevTouchHandler
 from .managers import (
     SleepManager, SmoothCarousel, PlayTimer, PerformanceMonitor, AutoPauseManager,
@@ -48,6 +65,9 @@ from .managers import (
 from .controllers import (
     VolumeController, PlaybackController, is_repeatable_spotify_context,
     LocalPlaybackController, VoiceRecorderController,
+)
+from .ui.home_launcher import (
+    HomeAppEntry, home_page_count, app_center, icon_hit_rect, visible_app_indices,
 )
 from .ui import ImageCache, Renderer, RenderContext
 from .utils import (
@@ -242,19 +262,16 @@ class Moki:
         # UI Components
         self.image_cache = ImageCache(IMAGES_DIR)
         self.icons = self._load_icons()
-        home_bg, home_musik_icon, home_musik_center, home_checker_icon, home_checker_center, home_local_music_icon, home_local_music_center, home_settings_icon, home_settings_center = self._load_home_assets()
+        home_bg, home_apps = self._load_home_assets()
         self.renderer = Renderer(
             self.screen, self.image_cache, self.icons,
             home_background=home_bg,
-            home_musik_icon=home_musik_icon,
-            home_musik_center=home_musik_center,
-            home_checker_icon=home_checker_icon,
-            home_checker_center=home_checker_center,
-            home_local_music_icon=home_local_music_icon,
-            home_local_music_center=home_local_music_center,
-            home_settings_icon=home_settings_icon,
-            home_settings_center=home_settings_center,
+            home_apps=home_apps,
         )
+        self.home_pager = SmoothCarousel()
+        self._home_touch = TouchHandler()
+        self._home_touch_active = False
+        self._sync_home_pager_limits()
         self.app_screen = AppScreen.HOME
         
         # Handlers
@@ -311,7 +328,7 @@ class Moki:
             has_network_fn=self._has_network_connection,
             on_before_restart=self._on_librespot_before_restart,
             on_after_restart=self._on_librespot_after_restart,
-            on_toast=self._show_toast,
+            on_toast=self._on_librespot_recovery_toast,
             mock_mode=self.mock_mode,
         )
         if not self.mock_mode and isinstance(self.api, LibrespotAPI):
@@ -339,14 +356,61 @@ class Moki:
             on_state_changed=self._on_local_playback_changed,
             on_stopped=self._on_local_playback_stopped,
             on_error=self._show_toast,
+            get_speaker_level=lambda: self.volume.speaker_level,
         )
+        self.voice_search_carousel = SmoothCarousel()
+        self._voice_search_phase = VoiceSearchPhase.CLOSED
+        self._voice_search_query: str = ''
+        self._voice_search_results: List[SearchResult] = []
+        self._voice_search_error: Optional[str] = None
+        self._voice_search_generation: int = 0
+        self._voice_search_selected_index: int = 0
+        self._voice_search_countdown_end: float = 0.0
         self.voice_recorder = VoiceRecorderController(
             mock_mode=self.mock_mode,
             on_state_changed=lambda: self.renderer.invalidate(),
             on_error=self._show_toast,
             get_speaker_level=lambda: self.volume.speaker_level,
             on_before_record=self._prepare_for_voice_recording,
-            should_restore_output=lambda: self.setup_menu.state != MenuState.VOICE_TEST,
+            should_restore_output=lambda: (
+                self.setup_menu.state != MenuState.VOICE_TEST
+                and self._voice_search_phase != VoiceSearchPhase.RECORDING
+            ),
+        )
+        self.voice_search_recorder = VoiceRecorderController(
+            mock_mode=self.mock_mode,
+            output_path=VOICE_SEARCH_LAST_PATH,
+            max_seconds=VOICE_SEARCH_MAX_SECONDS,
+            mp3_bitrate=VOICE_SEARCH_MP3_BITRATE,
+            auto_start_capture=False,
+            on_capture_ready=self._on_voice_search_capture_ready,
+            on_state_changed=lambda: self.renderer.invalidate(),
+            on_error=self._on_voice_search_error,
+            get_speaker_level=lambda: self.volume.speaker_level,
+            on_before_record=self._prepare_for_voice_recording,
+            should_restore_output=lambda: self._voice_search_phase == VoiceSearchPhase.CLOSED,
+            on_recording_complete=self._start_voice_search_pipeline,
+        )
+        self._mokibot_phase = MokiBotPhase.IDLE
+        self._mokibot_session_id: Optional[str] = None
+        self._mokibot_reply_text: str = ''
+        self._mokibot_play_name: Optional[str] = None
+        self._mokibot_generation: int = 0
+        self._mokibot_countdown_end: float = 0.0
+        self._mokibot_tts_cancel = threading.Event()
+        self.mokibot_recorder = VoiceRecorderController(
+            mock_mode=self.mock_mode,
+            output_path=MOKIBOT_RECORD_PATH,
+            max_seconds=MOKIBOT_MAX_SECONDS,
+            mp3_bitrate=VOICE_SEARCH_MP3_BITRATE,
+            auto_start_capture=False,
+            on_capture_ready=self._on_mokibot_capture_ready,
+            on_state_changed=lambda: self.renderer.invalidate(),
+            on_error=self._on_mokibot_error,
+            get_speaker_level=lambda: self.volume.speaker_level,
+            on_before_record=self._prepare_for_voice_recording,
+            should_restore_output=lambda: self._mokibot_phase == MokiBotPhase.IDLE,
+            on_recording_complete=self._start_mokibot_pipeline,
         )
         self._voice_play_cancel = threading.Event()
         self._voice_test_uri = 'voice:test:last'
@@ -414,6 +478,7 @@ class Moki:
         # Block focus auto-play after opening CheckPod from home until explicit play.
         self._checkpod_launch_lock: bool = False
         self._checkpod_play_in_progress: bool = False
+        self._checkpod_load_more_scheduled: bool = False
         self._checkpod_pending_focus_uri: Optional[str] = None
         self._checkpod_pending_focus_since: float = 0.0
         self._last_checkpod_progress_save: float = 0.0
@@ -430,6 +495,8 @@ class Moki:
         self._local_music_play_failed_at: float = 0.0
         self._local_music_play_target_uri: Optional[str] = None
         self._last_local_music_context_uri: Optional[str] = None
+        self._radio_launch_lock: bool = False
+        self._radio_play_in_progress: bool = False
         self._autoplay_stall_since: float = 0.0
         self._last_autoplay_stall_log: float = 0.0
         self._context_switch_stall_since: float = 0.0
@@ -451,6 +518,19 @@ class Moki:
         self._toast_message: Optional[str] = None
         self._toast_time: float = 0
         self._toast_duration: float = 3.0
+
+        # Music search (Settings → Musik suchen)
+        self._search_query: str = ''
+        self._search_results: List[SearchResult] = []
+        self._search_loading: bool = False
+        self._search_error: Optional[str] = None
+        self._search_generation: int = 0
+
+        # Voice transcription (Settings → Sprachtest)
+        self._voice_transcript: Optional[str] = None
+        self._voice_transcribing: bool = False
+        self._voice_transcribe_error: Optional[str] = None
+        self._voice_transcribe_generation: int = 0
         
         # Startup gate: blocks auto-play until _initial_connect completes
         self._startup_ready = False
@@ -459,6 +539,7 @@ class Moki:
         self._cached_has_network: bool = True
         self._network_check_time: float = 0.0
         self._last_sleep_network_reconnect_at: float = 0.0
+        self._librespot_recovery_suppressed_until: float = 0.0
         
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGTERM, self._handle_signal)
@@ -492,6 +573,12 @@ class Moki:
             on_leave_voice_test=self._on_leave_voice_test,
             on_voice_record_toggle=self._on_voice_record_toggle,
             on_voice_play=self._on_voice_play,
+            on_voice_transcribe=self._on_voice_transcribe,
+            on_enter_music_search=self._on_enter_music_search,
+            on_music_search_key=self._on_music_search_key,
+            on_music_search_submit=self._on_music_search_submit,
+            on_music_search_result=self._on_music_search_result,
+            on_suppress_librespot_recovery=self.suppress_librespot_recovery,
         )
         # Volume button hold tracking (3s hold opens setup menu)
         self._volume_hold_start: Optional[float] = None
@@ -499,6 +586,7 @@ class Moki:
         # Menu scroll tracking
         self._menu_touch_start: Optional[tuple] = None
         self._menu_touch_scrolled: bool = False
+        self._voice_search_touch_active: bool = False
         
         # Initialize carousel
         self._update_carousel_max_index()
@@ -521,30 +609,35 @@ class Moki:
             'back': 'back.png',
             'home': 'home.png',
             'reload': 'reload.png',
+            'mic': 'mic.png',
             'logo': APP_LOGO,
         }
         for name, filename in icon_files.items():
             try:
                 icon = pygame.image.load(ICONS_DIR / filename).convert_alpha()
-                if name == 'home':
+                if name in ('home', 'mic'):
                     icon = pygame.transform.rotate(icon, -90)
                 icons[name] = icon
             except Exception as e:
                 logger.warning(f'Failed to load icon {filename}: {e}', exc_info=True)
         return icons
 
-    def _load_home_icon(self, icon_path: Path, center: tuple[int, int]) -> Optional[pygame.Surface]:
+    def _load_home_icon(self, icon_path: Path) -> Optional[pygame.Surface]:
         icon = pygame.image.load(icon_path).convert_alpha()
         icon_scaled = pygame.transform.smoothscale(icon, (HOME_ICON_SIZE, HOME_ICON_SIZE))
         return pygame.transform.rotate(icon_scaled, -90)
 
     def _load_home_assets(self):
-        """Load and prepare home screen background + launcher icons."""
+        """Load home background and launcher app icons."""
         bg_path = ASSETS_DIR / 'moki-background.png'
-        musik_path = ASSETS_DIR / 'musik.png'
-        checker_path = ASSETS_DIR / 'Checkpod.png'
-        local_music_path = ASSETS_DIR / 'local-music.png'
-        settings_path = ASSETS_DIR / 'settings.png'
+        app_defs = [
+            ('musik', ASSETS_DIR / 'musik.png'),
+            ('checker', ASSETS_DIR / 'Checkpod.png'),
+            ('local_music', ASSETS_DIR / 'local-music.png'),
+            ('radio', ASSETS_DIR / 'radio-teddy.png'),
+            ('mokibot', ASSETS_DIR / 'mokibot.png'),
+            ('settings', ASSETS_DIR / 'settings.png'),
+        ]
         try:
             bg = pygame.image.load(bg_path).convert()
             bg_rot = pygame.transform.rotate(bg, -90)
@@ -555,49 +648,83 @@ class Moki:
                 (max(1, int(rot_w * scale)), max(1, int(rot_h * scale))),
             )
 
-            icon_x = int(SCREEN_WIDTH * HOME_ICON_SCREEN_X_FRAC)
-            musik_center = (icon_x, int(SCREEN_HEIGHT * HOME_ICON_SCREEN_Y_FRAC))
-            checker_center = (icon_x, int(SCREEN_HEIGHT * HOME_CHECKER_ICON_SCREEN_Y_FRAC))
-            local_music_center = (icon_x, int(SCREEN_HEIGHT * HOME_LOCAL_MUSIC_ICON_SCREEN_Y_FRAC))
-            settings_center = (icon_x, int(SCREEN_HEIGHT * HOME_SETTINGS_ICON_SCREEN_Y_FRAC))
+            apps: List[HomeAppEntry] = []
+            for app_id, path in app_defs:
+                if not path.exists():
+                    logger.warning(f'Home icon missing ({app_id}): {path}')
+                    continue
+                icon = self._load_home_icon(path)
+                if icon:
+                    apps.append(HomeAppEntry(app_id, icon))
 
-            musik_icon = self._load_home_icon(musik_path, musik_center)
-            checker_icon = None
-            if checker_path.exists():
-                checker_icon = self._load_home_icon(checker_path, checker_center)
-            else:
-                logger.warning(f'Checker Tobi icon missing: {checker_path}')
-
-            local_music_icon = None
-            if local_music_path.exists():
-                local_music_icon = self._load_home_icon(local_music_path, local_music_center)
-            else:
-                logger.warning(f'Local music icon missing: {local_music_path}')
-
-            settings_icon = None
-            if settings_path.exists():
-                settings_icon = self._load_home_icon(settings_path, settings_center)
-            else:
-                logger.warning(f'Settings icon missing: {settings_path}')
-
-            logger.info(
-                f'Home assets loaded | checker={checker_center} | local_music={local_music_center} | '
-                f'musik={musik_center} | settings={settings_center}'
-            )
-            return (
-                bg_scaled, musik_icon, musik_center, checker_icon, checker_center,
-                local_music_icon, local_music_center, settings_icon, settings_center,
-            )
+            logger.info(f'Home assets loaded | apps={len(apps)} pages={home_page_count(len(apps))}')
+            return bg_scaled, apps
         except Exception as e:
             logger.warning(f'Failed to load home assets: {e}', exc_info=True)
-            return None, None, None, None, None, None, None, None, None
+            return None, []
+
+    def _sync_home_pager_limits(self):
+        pages = home_page_count(len(self.renderer._home_apps))
+        self.home_pager.max_index = max(0, pages - 1)
+
+    def _reset_home_pager(self):
+        self.home_pager.scroll_x = 0.0
+        self.home_pager.set_target(0)
+        self._home_touch_active = False
+        self._home_touch.dragging = False
+        self._home_touch.drag_offset = 0
+
+    def _open_home_app(self, app_id: str):
+        handlers = {
+            'musik': self._open_spotify_screen,
+            'checker': self._open_checkpod_screen,
+            'local_music': self._open_local_music_screen,
+            'radio': self._open_radio_screen,
+            'mokibot': self._open_mokibot_screen,
+            'settings': self._open_settings_with_pin,
+        }
+        handler = handlers.get(app_id)
+        if handler:
+            handler()
+
+    def _home_icon_at_pos(self, pos) -> Optional[str]:
+        if self.app_screen != AppScreen.HOME:
+            return None
+        if self._home_touch.dragging and self._home_touch.is_swiping:
+            return None
+        drag_offset = self._home_touch.drag_offset if self._home_touch_active else 0.0
+        if self._home_touch_active and self._home_touch.dragging:
+            page_scroll = self.home_pager.scroll_x - drag_offset / SCREEN_HEIGHT
+        else:
+            page_scroll = self.home_pager.scroll_x
+        for index in visible_app_indices(len(self.renderer._home_apps), page_scroll):
+            app = self.renderer._home_apps[index]
+            center = app_center(index, page_scroll, drag_offset if self._home_touch_active else 0.0)
+            if icon_hit_rect(center).collidepoint(pos):
+                return app.app_id
+        return None
+
+    def _radio_catalog_item(self) -> CatalogItem:
+        return CatalogItem(
+            id='radio_teddy',
+            uri=RADIO_TEDDY_CONTEXT_URI,
+            name=RADIO_TEDDY_NAME,
+            type='radio',
+            artist='Live',
+            image=RADIO_TEDDY_IMAGE_PATH,
+        )
 
     def _display_items(self) -> List[CatalogItem]:
         if self.app_screen == AppScreen.CHECKPOD:
             return self.checkpod_manager.get_display_items()
         if self.app_screen == AppScreen.LOCAL_MUSIC:
             return self.local_music_manager.get_display_items()
+        if self.app_screen == AppScreen.RADIO:
+            return [self._radio_catalog_item()]
         return self.display_items
+
+    def _uses_mpv_playback_ui(self) -> bool:
+        return self.app_screen in (AppScreen.CHECKPOD, AppScreen.LOCAL_MUSIC, AppScreen.RADIO)
 
     def _is_local_media_screen(self) -> bool:
         screen = getattr(self, 'app_screen', None)
@@ -632,11 +759,38 @@ class Moki:
         self._local_music_pending_focus_uri = None
         self._local_music_pending_focus_since = 0.0
 
+    def _reset_radio_screen_state(self):
+        self._radio_launch_lock = False
+        self._radio_play_in_progress = False
+
+    def _reset_mokibot_screen_state(self):
+        """No-op — MokiBot state is cleared via _cancel_mokibot_pipeline."""
+        pass
+
+    def _is_moki_local_playback_uri(self, context_uri: Optional[str]) -> bool:
+        if not context_uri:
+            return False
+        return (
+            context_uri.startswith('radio:')
+            or context_uri.startswith('local:music:')
+            or context_uri.startswith('urn:ard:episode:')
+            or context_uri == MOKIBOT_TTS_CONTEXT_URI
+        )
+
+    def _clear_local_playback_now_playing(self):
+        """Drop mpv mirror state so Spotify pause/mute is not triggered by mistake."""
+        ctx = self.now_playing.context_uri or ''
+        if self._is_moki_local_playback_uri(ctx):
+            self.now_playing = NowPlaying(stopped=True)
+            self.renderer.invalidate()
+
     def _pause_active_playback(self, reason: str):
         """Stop whatever is currently playing (Spotify or local media)."""
         if self.local_playback.is_active:
             self._save_local_media_progress_now(reason)
             self.local_playback.stop(save_progress=False)
+            self._clear_local_playback_now_playing()
+            return
         if (self.now_playing.playing or self.playback.play_state.should_show_loading
                 or self.playback._play_in_progress):
             self.playback._execute_pause(reason)
@@ -647,7 +801,7 @@ class Moki:
         if playing:
             return True
 
-        if self.app_screen != AppScreen.SPOTIFY:
+        if self.app_screen not in (AppScreen.SPOTIFY, AppScreen.MOKIBOT):
             return False
 
         np = self.now_playing
@@ -655,12 +809,16 @@ class Moki:
 
     def _open_home_screen(self):
         """Switch to home screen and stop playback immediately."""
-        self._pause_active_playback('home_open')
+        self._close_voice_search()
+        self._cancel_mokibot_pipeline(reset_session=True)
         if self.app_screen != AppScreen.HOME:
             self._set_manual_pause_lock('home_open')
+        self._pause_active_playback('home_open')
         self.app_screen = AppScreen.HOME
         self._reset_checkpod_screen_state()
         self._reset_local_music_screen_state()
+        self._reset_radio_screen_state()
+        self._reset_home_pager()
         self._pressed_button = None
         self.renderer.invalidate()
         logger.info('Home screen opened')
@@ -670,10 +828,12 @@ class Moki:
         if getattr(self.local_playback, 'is_active', False):
             self._save_local_media_progress_now('spotify_open')
             self.local_playback.stop(save_progress=False)
+            self._clear_local_playback_now_playing()
         self.app_screen = AppScreen.SPOTIFY
         self._spotify_launch_lock = True
         self._reset_checkpod_screen_state()
         self._reset_local_music_screen_state()
+        self._reset_radio_screen_state()
         self._reset_pending_focus('spotify_open')
         self._update_carousel_max_index()
         self._pressed_button = None
@@ -688,6 +848,7 @@ class Moki:
         self._checkpod_launch_lock = True
         self._spotify_launch_lock = False
         self._reset_local_music_screen_state()
+        self._reset_radio_screen_state()
         self._checkpod_play_in_progress = False
         self._checkpod_play_target_uri = None
         self._checkpod_pending_focus_uri = None
@@ -708,6 +869,7 @@ class Moki:
         self._local_music_launch_lock = True
         self._spotify_launch_lock = False
         self._reset_checkpod_screen_state()
+        self._reset_radio_screen_state()
         self._local_music_play_in_progress = False
         self._local_music_play_target_uri = None
         self._local_music_pending_focus_uri = None
@@ -720,11 +882,398 @@ class Moki:
         self.local_playback.warm_up()
         logger.info('Local music screen opened (launch lock active)')
 
+    def _open_radio_screen(self):
+        """Open Radio TEDDY live stream screen without auto-starting playback."""
+        self._pause_active_playback('radio_open')
+        self._set_manual_pause_lock('radio_open')
+        self.app_screen = AppScreen.RADIO
+        self._radio_launch_lock = True
+        self._spotify_launch_lock = False
+        self._reset_checkpod_screen_state()
+        self._reset_local_music_screen_state()
+        self._radio_play_in_progress = False
+        self.selected_index = 0
+        self.carousel.max_index = 0
+        self.carousel.scroll_x = 0.0
+        self.carousel.set_target(0)
+        self._update_carousel_max_index()
+        self._pressed_button = None
+        self.renderer.invalidate()
+        self.local_playback.warm_up()
+        logger.info('Radio screen opened (launch lock active)')
+
+    def _open_mokibot_screen(self):
+        """Open MokiBot voice assistant screen."""
+        self._cancel_mokibot_pipeline(reset_session=True)
+        self._pause_active_playback('mokibot_open')
+        self._set_manual_pause_lock('mokibot_open')
+        self._close_voice_search()
+        self.app_screen = AppScreen.MOKIBOT
+        self._spotify_launch_lock = False
+        self._reset_checkpod_screen_state()
+        self._reset_local_music_screen_state()
+        self._reset_radio_screen_state()
+        self._mokibot_phase = MokiBotPhase.IDLE
+        self._mokibot_reply_text = ''
+        self._mokibot_play_name = None
+        self._mokibot_countdown_end = 0.0
+        self._pressed_button = None
+        MOKIBOT_DIR.mkdir(parents=True, exist_ok=True)
+        self.renderer.invalidate()
+        self.local_playback.warm_up()
+        logger.info('MokiBot screen opened')
+
+    def _cancel_mokibot_pipeline(self, *, reset_session: bool = False):
+        """Stop in-flight MokiBot recording, TTS, or API work."""
+        self._mokibot_generation += 1
+        self._mokibot_tts_cancel.set()
+        self.mokibot_recorder.cancel()
+        playing, paused, _, _, ctx, _ = self.local_playback.get_state()
+        if ctx == MOKIBOT_TTS_CONTEXT_URI and (
+            playing or paused or self.local_playback.is_active
+        ):
+            self.local_playback.stop(save_progress=False)
+            self._clear_local_playback_now_playing()
+        self._mokibot_phase = MokiBotPhase.IDLE
+        self._mokibot_countdown_end = 0.0
+        if reset_session:
+            self._mokibot_session_id = None
+            self._mokibot_reply_text = ''
+            self._mokibot_play_name = None
+        self.renderer.invalidate()
+
+    def _mokibot_status_text(self) -> str:
+        phase = self._mokibot_phase
+        if phase == MokiBotPhase.IDLE:
+            return 'Tippe das Mikrofon und sag mir, was du hören willst.'
+        if phase == MokiBotPhase.PREPARING:
+            return 'Mikrofon wird bereit…'
+        if phase == MokiBotPhase.COUNTDOWN:
+            return ''
+        if phase == MokiBotPhase.RECORDING:
+            return 'Ich höre zu…'
+        if phase == MokiBotPhase.THINKING:
+            return 'Einen Moment…'
+        if phase == MokiBotPhase.SPEAKING:
+            return ''
+        if phase == MokiBotPhase.PLAYING and self._mokibot_play_name:
+            return f'Ich spiele: {self._mokibot_play_name}'
+        return ''
+
+    def _mokibot_countdown_label(self) -> str:
+        if self._mokibot_phase != MokiBotPhase.COUNTDOWN:
+            return ''
+        remaining = self._mokibot_countdown_end - time.time()
+        if remaining > 3.0:
+            return '3'
+        if remaining > 2.0:
+            return '2'
+        if remaining > 1.0:
+            return '1'
+        if remaining > 0.0:
+            return 'OK'
+        return ''
+
+    def _on_mokibot_error(self, message: str):
+        logger.warning(f'MokiBot recorder error: {message}')
+        if self._mokibot_phase != MokiBotPhase.IDLE:
+            self._cancel_mokibot_pipeline()
+            self._show_toast(message)
+
+    def _on_mokibot_capture_ready(self):
+        self._mokibot_countdown_end = time.time() + VOICE_SEARCH_COUNTDOWN_SECONDS
+        self._mokibot_phase = MokiBotPhase.COUNTDOWN
+        self.renderer.invalidate()
+
+    def _tick_mokibot(self):
+        if self._mokibot_phase != MokiBotPhase.COUNTDOWN:
+            return
+        if time.time() < self._mokibot_countdown_end:
+            return
+        if self.mokibot_recorder.start_capture():
+            self._mokibot_phase = MokiBotPhase.RECORDING
+            self.renderer.invalidate()
+        else:
+            self._cancel_mokibot_pipeline()
+            self._show_toast('Mikrofon nicht bereit')
+
+    def _on_mokibot_mic(self):
+        if self._mokibot_phase in (
+            MokiBotPhase.PREPARING,
+            MokiBotPhase.COUNTDOWN,
+            MokiBotPhase.THINKING,
+            MokiBotPhase.SPEAKING,
+        ):
+            return
+        if self._mokibot_phase in (MokiBotPhase.IDLE, MokiBotPhase.PLAYING):
+            self._pause_active_playback('mokibot_record')
+            self._mokibot_tts_cancel.set()
+            self._mokibot_generation += 1
+            self._mokibot_countdown_end = 0.0
+            self._mokibot_phase = MokiBotPhase.PREPARING
+            self._pressed_button = 'mokibot_mic'
+            self._pressed_time = time.time()
+            self.renderer.invalidate()
+            self.mokibot_recorder.begin_recording()
+        elif self._mokibot_phase == MokiBotPhase.RECORDING:
+            if self.mokibot_recorder.is_recording:
+                self._pressed_button = 'mokibot_mic'
+                self._pressed_time = time.time()
+                self.renderer.invalidate()
+                self.mokibot_recorder.stop_recording()
+
+    def _start_mokibot_pipeline(self):
+        if self._mokibot_phase != MokiBotPhase.RECORDING:
+            return
+        self._mokibot_generation += 1
+        generation = self._mokibot_generation
+        self._mokibot_phase = MokiBotPhase.THINKING
+        self.renderer.invalidate()
+        logger.info('MokiBot pipeline started')
+
+        def _run():
+            try:
+                if not moki_transcribe.wait_for_api(max_wait=VOICE_SEARCH_API_PROBE_MAX_WAIT):
+                    if generation != self._mokibot_generation:
+                        return
+                    self._cancel_mokibot_pipeline()
+                    self._show_toast('Keine Verbindung zum Server')
+                    return
+
+                text = moki_transcribe.transcribe(
+                    MOKIBOT_RECORD_PATH,
+                    timeout=(VOICE_SEARCH_API_CONNECT_TIMEOUT, VOICE_SEARCH_API_READ_TIMEOUT),
+                )
+                if generation != self._mokibot_generation:
+                    return
+                logger.info(f'MokiBot transcript: "{text[:80]}"')
+
+                response = moki_assistant.assistant_request(
+                    text,
+                    session_id=self._mokibot_session_id,
+                )
+                if generation != self._mokibot_generation:
+                    return
+                if response.session_id:
+                    self._mokibot_session_id = response.session_id
+                self._handle_mokibot_response(response, generation)
+            except requests.HTTPError as e:
+                if generation != self._mokibot_generation:
+                    return
+                logger.warning(f'MokiBot assistant HTTP error: {e}')
+                self._cancel_mokibot_pipeline()
+                self._show_toast('Server-Fehler — bitte nochmal versuchen')
+            except requests.RequestException as e:
+                if generation != self._mokibot_generation:
+                    return
+                logger.warning(f'MokiBot network error: {e}')
+                self._cancel_mokibot_pipeline()
+                self._show_toast('Keine Verbindung — bitte nochmal versuchen')
+            except (ValueError, FileNotFoundError, RuntimeError) as e:
+                if generation != self._mokibot_generation:
+                    return
+                logger.warning(f'MokiBot pipeline error: {e}')
+                self._cancel_mokibot_pipeline()
+                self._show_toast('Das habe ich nicht verstanden')
+            except Exception as e:
+                if generation != self._mokibot_generation:
+                    return
+                logger.error(f'MokiBot pipeline failed: {e}', exc_info=True)
+                self._cancel_mokibot_pipeline()
+                self._show_toast('Etwas ist schiefgelaufen')
+
+        run_async(_run)
+
+    def _wait_mokibot_tts_done(self, generation: int, timeout: float = 30.0) -> bool:
+        """Wait until TTS mpv playback finishes so Spotify can start."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if generation != self._mokibot_generation or self._mokibot_tts_cancel.is_set():
+                return False
+            playing, paused, position_ms, duration_ms, ctx, _ = self.local_playback.get_state()
+            if ctx != MOKIBOT_TTS_CONTEXT_URI:
+                return True
+            if not playing and not paused:
+                return True
+            if duration_ms > 0 and position_ms >= max(0, duration_ms - 400):
+                time.sleep(0.2)
+                return True
+            time.sleep(0.1)
+        logger.warning('MokiBot TTS wait timed out — starting Spotify anyway')
+        return True
+
+    def _handle_mokibot_response(self, response: AssistantResponse, generation: int):
+        self._mokibot_reply_text = response.reply_text or ''
+        self._mokibot_phase = MokiBotPhase.SPEAKING
+        self.renderer.invalidate()
+        logger.info(f'MokiBot action={response.action} reply="{self._mokibot_reply_text[:60]}"')
+
+        def _tts_then_continue():
+            tts_path = MOKIBOT_TTS_PATH
+            if response.reply_audio_url:
+                try:
+                    moki_assistant.download_tts(response.reply_audio_url, tts_path)
+                except requests.RequestException as e:
+                    logger.warning(f'MokiBot TTS download failed: {e}')
+            if generation != self._mokibot_generation:
+                return
+            if tts_path.is_file() and tts_path.stat().st_size > 0:
+                self._mokibot_tts_cancel.clear()
+                ok = self.local_playback.play(
+                    tts_path,
+                    context_uri=MOKIBOT_TTS_CONTEXT_URI,
+                    track_name='MokiBot',
+                    start_position_ms=0,
+                    duration_ms=0,
+                )
+                if ok:
+                    if not self._wait_mokibot_tts_done(generation):
+                        return
+                elif generation == self._mokibot_generation:
+                    unmute_wm8960_output(self.volume.speaker_level)
+            if generation != self._mokibot_generation:
+                return
+            if response.action == 'play' and response.play:
+                logger.info('MokiBot TTS done — enqueueing Spotify play')
+                self._mokibot_play_result(response.play, generation)
+            elif response.action == 'play' and not response.play:
+                logger.warning('MokiBot action=play but no play payload from API')
+                self._mokibot_phase = MokiBotPhase.IDLE
+                self.renderer.invalidate()
+            else:
+                self._mokibot_phase = MokiBotPhase.IDLE
+                self.renderer.invalidate()
+
+        run_async(_tts_then_continue)
+
+    def _mokibot_play_result(self, result: SearchResult, generation: int):
+        if generation != self._mokibot_generation:
+            return
+        logger.info(
+            f'MokiBot play: {result.name} ({result.type}) uri={result.uri[:40]}'
+        )
+
+        def _save_and_play():
+            if generation != self._mokibot_generation:
+                return
+            item_data = {
+                'type': result.type,
+                'uri': result.uri,
+                'name': result.name,
+                'artist': result.artist,
+                'image': result.image_url,
+            }
+            saved = self.catalog_manager.save_item(item_data)
+            self.catalog_manager.load()
+            self._update_carousel_max_index()
+            self.image_cache.preload_catalog(self.catalog_manager.items)
+
+            items = self.display_items
+            target_index = next(
+                (i for i, item in enumerate(items) if item.uri == result.uri),
+                None,
+            )
+            if target_index is None:
+                target_index = max(0, len(items) - 1) if items else 0
+            if not items:
+                logger.warning(f'MokiBot play: no catalog items after save uri={result.uri[:40]}')
+                self._mokibot_phase = MokiBotPhase.IDLE
+                self.renderer.invalidate()
+                return
+
+            if generation != self._mokibot_generation:
+                return
+            _, _, _, _, ctx, _ = self.local_playback.get_state()
+            if ctx == MOKIBOT_TTS_CONTEXT_URI and self.local_playback.is_active:
+                self.local_playback.stop(save_progress=False)
+                self._clear_local_playback_now_playing()
+            self.selected_index = target_index
+            self.carousel.set_target(target_index)
+            self._bump_focus_epoch(f'mokibot_play {target_index}')
+            self._clear_manual_pause_lock('mokibot_play')
+            self._clear_spotify_launch_lock('mokibot_play')
+            self._user_activated_playback = True
+            self._play_item(result.uri)
+            self._mokibot_play_name = result.name
+            self._mokibot_phase = MokiBotPhase.PLAYING
+            if saved:
+                self._show_toast('Gespeichert')
+            self.renderer.invalidate()
+
+        run_async(_save_and_play)
+
+    def _handle_mokibot_touch_down(self, pos):
+        if self.renderer.mokibot_home_rect and self.renderer.mokibot_home_rect.collidepoint(pos):
+            self._pressed_button = 'mokibot_home'
+            self._pressed_time = time.time()
+            self.renderer.invalidate()
+            return
+        if (
+            self._mokibot_phase in (MokiBotPhase.IDLE, MokiBotPhase.RECORDING, MokiBotPhase.PLAYING)
+            and self.renderer.mokibot_mic_rect
+            and self.renderer.mokibot_mic_rect.collidepoint(pos)
+        ):
+            self._on_mokibot_mic()
+
+    def _handle_mokibot_touch_up(self, pos):
+        if self._pressed_button == 'mokibot_home':
+            rect = self.renderer.mokibot_home_rect
+            self._pressed_button = None
+            if rect and rect.collidepoint(pos):
+                self._open_home_screen()
+            else:
+                self.renderer.invalidate()
+            return
+        if self._pressed_button == 'mokibot_mic':
+            self._pressed_button = None
+            self.renderer.invalidate()
+
     def _refresh_checkpod_episodes(self):
         """Refresh ARD catalog and prune stale downloads."""
         self.checkpod_manager.refresh_episodes()
         _, _, _, _, context_uri, _ = self.local_playback.get_state()
         self.checkpod_manager.cleanup_stale_downloads(active_context_uri=context_uri)
+        if self.app_screen == AppScreen.CHECKPOD:
+            self._update_carousel_max_index()
+            self.renderer.invalidate()
+            self._maybe_load_more_checkpod_episodes()
+
+    def _maybe_load_more_checkpod_episodes(self):
+        """Prefetch older CheckPod episodes when the user nears the list end."""
+        if self.app_screen != AppScreen.CHECKPOD:
+            return
+        items = self.checkpod_manager.items
+        if not items:
+            return
+        if not self.checkpod_manager.has_more_episodes:
+            return
+        if self._checkpod_load_more_scheduled or self.checkpod_manager.is_loading_more:
+            return
+        threshold = max(0, len(items) - CHECKPOD_LOAD_MORE_THRESHOLD)
+        if self.selected_index < threshold:
+            return
+        self._checkpod_load_more_scheduled = True
+        run_async(self._load_more_checkpod_episodes)
+
+    def _load_more_checkpod_episodes(self):
+        try:
+            added = self.checkpod_manager.load_more_episodes()
+            if not added:
+                return
+            if self.app_screen != AppScreen.CHECKPOD:
+                logger.info(
+                    f'CheckPod older episodes loaded in background | '
+                    f'total={len(self.checkpod_manager.items)}'
+                )
+                return
+            self._update_carousel_max_index()
+            self.renderer.invalidate()
+            logger.info(
+                f'CheckPod older episodes loaded | total={len(self.checkpod_manager.items)} '
+                f'| index={self.selected_index}'
+            )
+        finally:
+            self._checkpod_load_more_scheduled = False
 
     def _refresh_local_music_catalog(self):
         """Rescan on-disk MP3 library."""
@@ -736,18 +1285,29 @@ class Moki:
             if items and self.selected_index < len(items):
                 return items[self.selected_index].artist or 'Lokale Musik'
             return 'Lokale Musik'
+        if self.app_screen == AppScreen.RADIO:
+            return 'Live'
         return 'Checker Tobi'
 
     def _on_local_playback_changed(self):
         playing, paused, position_ms, duration_ms, context_uri, track_name = self.local_playback.get_state()
-        if not self._is_local_media_screen():
+        if not self._uses_mpv_playback_ui():
+            if not playing and not paused and self._is_moki_local_playback_uri(
+                self.now_playing.context_uri
+            ):
+                self.now_playing = NowPlaying(stopped=True)
+                self.renderer.invalidate()
             return
-        artist = self._local_media_default_artist()
-        if self.app_screen == AppScreen.LOCAL_MUSIC and context_uri:
+        if self.app_screen == AppScreen.RADIO:
+            artist = 'Live' if playing else ''
+        elif self.app_screen == AppScreen.LOCAL_MUSIC and context_uri:
+            artist = self._local_media_default_artist()
             for item in self.local_music_manager.get_display_items():
                 if item.uri == context_uri:
                     artist = item.artist or artist
                     break
+        else:
+            artist = self._local_media_default_artist()
         self.now_playing = NowPlaying(
             playing=playing,
             paused=paused,
@@ -852,6 +1412,15 @@ class Moki:
             if self._local_music_launch_lock:
                 logger.info(f'Local music launch lock cleared ({reason})')
             self._local_music_launch_lock = False
+        elif screen == AppScreen.RADIO:
+            if self._radio_launch_lock:
+                logger.info(f'Radio launch lock cleared ({reason})')
+            self._radio_launch_lock = False
+
+    def _clear_radio_launch_lock(self, reason: str):
+        if self._radio_launch_lock:
+            logger.info(f'Radio launch lock cleared ({reason})')
+        self._radio_launch_lock = False
 
     def _clear_checkpod_launch_lock(self, reason: str):
         self._clear_local_media_launch_lock(reason)
@@ -955,6 +1524,29 @@ class Moki:
 
         run_async(_do_play)
 
+    def _play_radio_stream(self):
+        if self._radio_play_in_progress:
+            return
+        item = self._radio_catalog_item()
+        if self._is_local_media_item_playing(item):
+            return
+
+        def _do_play():
+            self._radio_play_in_progress = True
+            self.renderer.invalidate()
+            ok = self.local_playback.play_stream(
+                RADIO_TEDDY_STREAM_URL,
+                context_uri=item.uri,
+                track_name=item.name,
+            )
+            self._radio_play_in_progress = False
+            if ok:
+                self.volume.unmute()
+                self._clear_radio_launch_lock('play_started')
+            self.renderer.invalidate()
+
+        run_async(_do_play)
+
     def _play_local_media_item(self, item: CatalogItem, from_beginning: bool = False):
         if self.app_screen == AppScreen.CHECKPOD:
             self._play_checkpod_item(item, from_beginning=from_beginning)
@@ -988,6 +1580,7 @@ class Moki:
             self.voice_recorder.cancel()
         if self._is_voice_test_playing():
             self.local_playback.stop(save_progress=False)
+        self._reset_voice_transcribe_state()
         unmute_wm8960_output(self.volume.speaker_level)
         self.renderer.invalidate()
 
@@ -1003,7 +1596,59 @@ class Moki:
         return boosted
 
     def _on_voice_record_toggle(self):
+        if not self.voice_recorder.is_recording:
+            self._reset_voice_transcribe_state()
         self.voice_recorder.toggle_recording()
+
+    def _reset_voice_transcribe_state(self):
+        self._voice_transcript = None
+        self._voice_transcribing = False
+        self._voice_transcribe_error = None
+        self._voice_transcribe_generation += 1
+
+    def _on_voice_transcribe(self):
+        if not self.voice_recorder.has_recording():
+            self._show_toast('Noch keine Aufnahme')
+            return
+        if (
+            self.voice_recorder.is_recording
+            or self.voice_recorder.is_encoding
+            or self.voice_recorder.is_preparing
+            or self._voice_transcribing
+        ):
+            return
+        if not self._get_cached_network_status():
+            self._show_toast('Kein Internet')
+            return
+
+        self._voice_transcribe_generation += 1
+        generation = self._voice_transcribe_generation
+        self._voice_transcribing = True
+        self._voice_transcribe_error = None
+        self._voice_transcript = None
+        self.renderer.invalidate()
+        logger.info('Voice transcribe started')
+
+        def _do_transcribe():
+            try:
+                text = moki_transcribe.transcribe(VOICE_TEST_LAST_PATH)
+                if generation != self._voice_transcribe_generation:
+                    return
+                self._voice_transcript = text
+                self._voice_transcribe_error = None
+                logger.info(f'Voice transcribe result: {text[:80]!r}')
+            except Exception as e:
+                logger.error(f'Voice transcribe failed: {e}', exc_info=True)
+                if generation != self._voice_transcribe_generation:
+                    return
+                self._voice_transcript = None
+                self._voice_transcribe_error = 'Transkription fehlgeschlagen'
+            finally:
+                if generation == self._voice_transcribe_generation:
+                    self._voice_transcribing = False
+                self.renderer.invalidate()
+
+        run_async(_do_transcribe)
 
     def _on_voice_play(self):
         if not self.voice_recorder.has_recording():
@@ -1036,6 +1681,463 @@ class Moki:
     def _is_voice_test_playing(self) -> bool:
         playing, _, _, _, context_uri, _ = self.local_playback.get_state()
         return bool(playing and context_uri == self._voice_test_uri)
+
+    def _on_enter_music_search(self):
+        """Open music search — pause playback while parent adds content."""
+        logger.info('Music search screen opened')
+        self._pause_active_playback('music_search_open')
+        self._search_generation += 1
+        self._search_query = ''
+        self._search_results = []
+        self._search_loading = False
+        self._search_error = None
+
+    def _on_music_search_key(self, key: str):
+        if key == 'space':
+            if len(self._search_query) < 80:
+                self._search_query += ' '
+        elif key == 'back':
+            self._search_query = self._search_query[:-1]
+        elif key and len(self._search_query) < 80:
+            self._search_query += key
+
+    def _on_music_search_submit(self):
+        query = self._search_query.strip()
+        if not query:
+            self._show_toast('Bitte Suchbegriff eingeben')
+            return
+
+        self._search_generation += 1
+        generation = self._search_generation
+        self._search_loading = True
+        self._search_error = None
+        self._search_results = []
+        self.setup_menu.state = MenuState.MUSIC_SEARCH_RESULTS
+        self.setup_menu.scroll_offset = 0
+        self.renderer.invalidate()
+        logger.info(f'Music search submit: q="{query}"')
+
+        def _do_search():
+            try:
+                results = moki_search.search(query)
+                if generation != self._search_generation:
+                    return
+                self._search_results = results
+                self._search_loading = False
+                self._search_error = None
+                logger.info(f'Music search done: {len(results)} results')
+            except Exception as e:
+                logger.error(f'Music search failed: {e}', exc_info=True)
+                if generation != self._search_generation:
+                    return
+                self._search_results = []
+                self._search_loading = False
+                self._search_error = 'Suche fehlgeschlagen'
+            self.renderer.invalidate()
+
+        run_async(_do_search)
+
+    def _on_music_search_result(self, index: int):
+        if index < 0 or index >= len(self._search_results):
+            return
+        result = self._search_results[index]
+        self._pressed_button = f'search_result_{index}'
+        self._pressed_time = time.time()
+        self.renderer.invalidate()
+        self._select_search_result(result, from_settings=True)
+
+    def _on_voice_search_error(self, message: str):
+        """Reset voice search UI after recorder failure."""
+        self._show_toast(message)
+        if self._voice_search_phase != VoiceSearchPhase.CLOSED:
+            self._voice_search_generation += 1
+            self._voice_search_phase = VoiceSearchPhase.CLOSED
+            self.renderer.invalidate()
+            logger.warning(f'Voice search reset after error: {message}')
+
+    def _close_voice_search(self):
+        """Close voice search overlay and reset state."""
+        self._voice_search_generation += 1
+        self.voice_search_recorder.cancel()
+        self._voice_search_phase = VoiceSearchPhase.CLOSED
+        self._voice_search_countdown_end = 0.0
+        self._voice_search_query = ''
+        self._voice_search_results = []
+        self._voice_search_error = None
+        self._voice_search_selected_index = 0
+        self.voice_search_carousel.scroll_x = 0.0
+        self.voice_search_carousel.set_target(0)
+        self.renderer.invalidate()
+        logger.info('Voice search closed')
+
+    def _voice_search_countdown_label(self) -> str:
+        """Map remaining countdown time to 3/2/1/OK step labels."""
+        if self._voice_search_phase != VoiceSearchPhase.COUNTDOWN:
+            return ''
+        remaining = self._voice_search_countdown_end - time.time()
+        if remaining > 3:
+            return '3'
+        if remaining > 2:
+            return '2'
+        if remaining > 1:
+            return '1'
+        if remaining > 0:
+            return 'OK'
+        return ''
+
+    def _on_voice_search_capture_ready(self):
+        """Mic hardware ready — start visible countdown before capture."""
+        self._voice_search_countdown_end = time.time() + VOICE_SEARCH_COUNTDOWN_SECONDS
+        self._voice_search_phase = VoiceSearchPhase.COUNTDOWN
+        self.renderer.invalidate()
+        logger.info('Voice search mic ready, countdown starting')
+
+    def _tick_voice_search(self):
+        """Advance countdown and start arecord when it hits zero."""
+        if self._voice_search_phase != VoiceSearchPhase.COUNTDOWN:
+            return
+        if time.time() < self._voice_search_countdown_end:
+            return
+        if self.voice_search_recorder.start_capture():
+            self._voice_search_phase = VoiceSearchPhase.RECORDING
+            self.renderer.invalidate()
+            logger.info('Voice search countdown done — speak now')
+        else:
+            self._close_voice_search()
+
+    def _on_voice_search_mic(self):
+        """Start or stop voice search recording."""
+        if self._voice_search_phase == VoiceSearchPhase.CLOSED:
+            self._pause_active_playback('voice_search_open')
+            configure_wm8960_mic_once()
+            mute_wm8960_output()
+            self._voice_search_generation += 1
+            self._voice_search_query = ''
+            self._voice_search_results = []
+            self._voice_search_error = None
+            self._voice_search_countdown_end = 0.0
+            self._voice_search_phase = VoiceSearchPhase.PREPARING
+            self._pressed_button = 'mic'
+            self._pressed_time = time.time()
+            self.renderer.invalidate()
+            logger.info('Voice search preparing')
+            self.voice_search_recorder.begin_recording()
+        elif self._voice_search_phase == VoiceSearchPhase.RECORDING:
+            if self.voice_search_recorder.is_recording:
+                self._pressed_button = 'mic'
+                self._pressed_time = time.time()
+                self.renderer.invalidate()
+                logger.info('Voice search recording stopping')
+                self.voice_search_recorder.stop_recording()
+
+    def _show_voice_search_results(self, results: List[SearchResult], generation: int):
+        """Show search hits immediately — covers may still be loading."""
+        if generation != self._voice_search_generation:
+            return
+        self._voice_search_results = results
+        self._voice_search_selected_index = 0
+        self.voice_search_carousel.max_index = max(0, len(results) - 1)
+        self.voice_search_carousel.scroll_x = 0.0
+        self.voice_search_carousel.set_target(0)
+        self._voice_search_phase = VoiceSearchPhase.RESULTS
+        self.renderer.invalidate()
+        logger.info(f'Voice search results: {len(results)} items')
+
+    def _prefetch_voice_search_covers(self, results: List[SearchResult], generation: int):
+        """Load cover images one-by-one after results are visible."""
+        def _run():
+            try:
+                def _on_update(updated: List[SearchResult]):
+                    if generation != self._voice_search_generation:
+                        return
+                    self._voice_search_results = updated
+                    self.renderer.invalidate()
+
+                prefetch_covers_incremental(results, on_update=_on_update)
+                if generation == self._voice_search_generation:
+                    logger.info('Voice search covers ready')
+            except Exception as e:
+                logger.warning(f'Voice search cover prefetch failed: {e}', exc_info=True)
+            finally:
+                if generation == self._voice_search_generation:
+                    self.renderer.invalidate()
+
+        run_async(_run)
+
+    def _start_voice_search_pipeline(self):
+        """Transcribe recording, search, show results, prefetch covers in background."""
+        if self._voice_search_phase != VoiceSearchPhase.RECORDING:
+            return
+
+        self._voice_search_generation += 1
+        generation = self._voice_search_generation
+        self._voice_search_phase = VoiceSearchPhase.TRANSCRIBING
+        self.renderer.invalidate()
+        logger.info('Voice search pipeline started')
+        pipeline_started = time.time()
+
+        def _run():
+            try:
+                if not self._get_cached_network_status():
+                    if generation != self._voice_search_generation:
+                        return
+                    self._close_voice_search()
+                    self._show_toast('Kein Internet')
+                    return
+
+                if not moki_transcribe.wait_for_api(max_wait=VOICE_SEARCH_API_PROBE_MAX_WAIT):
+                    if generation != self._voice_search_generation:
+                        return
+                    self._close_voice_search()
+                    self._show_toast('Internet noch nicht bereit — nochmal versuchen')
+                    return
+                logger.info(
+                    f'Voice search API ready in {time.time() - pipeline_started:.1f}s'
+                )
+
+                transcribe_started = time.time()
+                text = moki_transcribe.transcribe(
+                    VOICE_SEARCH_LAST_PATH,
+                    timeout=VOICE_SEARCH_API_READ_TIMEOUT,
+                )
+                if generation != self._voice_search_generation:
+                    return
+                self._voice_search_query = text
+                self._voice_search_phase = VoiceSearchPhase.SEARCHING
+                self.renderer.invalidate()
+                logger.info(
+                    f'Voice search query: {text[:80]!r} '
+                    f'(transcribe {time.time() - transcribe_started:.1f}s)'
+                )
+
+                search_started = time.time()
+                results = moki_search.search(text)
+                if generation != self._voice_search_generation:
+                    return
+                results = results[:VOICE_SEARCH_RESULT_LIMIT]
+
+                if not results:
+                    self._close_voice_search()
+                    self._show_toast('Keine Treffer')
+                    return
+
+                self._show_voice_search_results(results, generation)
+                logger.info(
+                    f'Voice search UI ready in {time.time() - pipeline_started:.1f}s '
+                    f'(search {time.time() - search_started:.1f}s, covers loading)'
+                )
+                self._prefetch_voice_search_covers(results, generation)
+            except requests.RequestException as e:
+                logger.error(f'Voice search network error: {e}', exc_info=True)
+                if generation != self._voice_search_generation:
+                    return
+                self._close_voice_search()
+                if isinstance(e, requests.Timeout):
+                    self._show_toast('Dauert zu lange — nochmal versuchen')
+                else:
+                    self._show_toast('Kein Internet')
+            except ValueError as e:
+                logger.error(f'Voice search transcribe empty/invalid: {e}', exc_info=True)
+                if generation != self._voice_search_generation:
+                    return
+                self._close_voice_search()
+                self._show_toast('Nicht verstanden — nochmal sprechen')
+            except requests.HTTPError as e:
+                logger.error(f'Voice search HTTP error: {e}', exc_info=True)
+                if generation != self._voice_search_generation:
+                    return
+                self._close_voice_search()
+                if e.response is not None and e.response.status_code == 503:
+                    self._show_toast('Gerade nicht verfügbar — nochmal versuchen')
+                else:
+                    self._show_toast('Suche fehlgeschlagen')
+            except Exception as e:
+                logger.error(f'Voice search pipeline failed: {e}', exc_info=True)
+                if generation != self._voice_search_generation:
+                    return
+                self._close_voice_search()
+                self._show_toast('Sprachsuche fehlgeschlagen')
+            finally:
+                if generation == self._voice_search_generation:
+                    self.renderer.invalidate()
+
+        run_async(_run)
+
+    def _select_search_result(self, result: SearchResult, *, from_settings: bool = False):
+        """Save search result to catalog and play."""
+        logger.info(
+            f'Search selected: {result.name} ({result.type}) uri={result.uri[:40]}'
+        )
+
+        def _save_and_play():
+            item_data = {
+                'type': result.type,
+                'uri': result.uri,
+                'name': result.name,
+                'artist': result.artist,
+                'image': result.image_url,
+            }
+            saved = self.catalog_manager.save_item(item_data)
+            self.catalog_manager.load()
+            self._update_carousel_max_index()
+            self.image_cache.preload_catalog(self.catalog_manager.items)
+            if from_settings:
+                self.setup_menu.close()
+                self._search_query = ''
+                self._search_results = []
+                self._search_loading = False
+                self._search_error = None
+            else:
+                self._close_voice_search()
+            self._open_spotify_screen()
+            self._focus_catalog_uri_and_play(result.uri)
+            if saved:
+                self._show_toast('Gespeichert')
+            else:
+                self._show_toast('Schon in deiner Liste')
+            self.renderer.invalidate()
+
+        run_async(_save_and_play)
+
+    def _voice_search_catalog_items(self) -> List[CatalogItem]:
+        """Convert voice search results to temporary catalog items for the carousel."""
+        items = []
+        for i, result in enumerate(self._voice_search_results):
+            items.append(
+                CatalogItem(
+                    id=f'voice_search:{i}',
+                    uri=result.uri,
+                    name=result.name,
+                    type=result.type,
+                    artist=result.artist,
+                    image=result.preview_image,
+                )
+            )
+        return items
+
+    def _snap_to_voice_search(self, target_index: int):
+        """Snap voice search results carousel to index."""
+        items = self._voice_search_results
+        if not items:
+            return
+        target_index = max(0, min(target_index, len(items) - 1))
+        if target_index != self._voice_search_selected_index:
+            self._voice_search_selected_index = target_index
+            self.voice_search_carousel.set_target(target_index)
+            self.renderer.invalidate()
+
+    def _navigate_voice_search(self, direction: int):
+        """Move voice search carousel by one item."""
+        items = self._voice_search_results
+        if not items:
+            return
+        new_index = max(0, min(self._voice_search_selected_index + direction, len(items) - 1))
+        self._snap_to_voice_search(new_index)
+
+    def _handle_voice_search_touch_down(self, pos):
+        """Touch down while voice search overlay is open."""
+        if self._voice_search_phase == VoiceSearchPhase.RESULTS:
+            if self.renderer.voice_search_close_rect and self.renderer.voice_search_close_rect.collidepoint(pos):
+                self._pressed_button = 'voice_search_close'
+                self._pressed_time = time.time()
+                self.renderer.invalidate()
+                return
+            carousel_x_min = CAROUSEL_X - CAROUSEL_TOUCH_MARGIN
+            carousel_x_max = CAROUSEL_X + COVER_SIZE + CAROUSEL_TOUCH_MARGIN
+            x, _y = pos
+            if carousel_x_min <= x <= carousel_x_max:
+                self._voice_search_touch_active = True
+                self.touch.on_down(pos)
+            return
+
+        if self.renderer.voice_search_close_rect and self.renderer.voice_search_close_rect.collidepoint(pos):
+            self._pressed_button = 'voice_search_close'
+            self._pressed_time = time.time()
+            self.renderer.invalidate()
+            return
+
+        if (
+            self._voice_search_phase == VoiceSearchPhase.RECORDING
+            and self.renderer.voice_search_mic_rect
+            and self.renderer.voice_search_mic_rect.collidepoint(pos)
+        ):
+            self._on_voice_search_mic()
+
+    def _handle_voice_search_touch_up(self, pos):
+        """Touch up while voice search results carousel is active."""
+        if self._voice_search_phase != VoiceSearchPhase.RESULTS:
+            if self._pressed_button == 'voice_search_close':
+                close_rect = self.renderer.voice_search_close_rect
+                self._pressed_button = None
+                self.renderer.invalidate()
+                if close_rect and close_rect.collidepoint(pos):
+                    self._close_voice_search()
+            return
+        if self._pressed_button == 'voice_search_close':
+            close_rect = self.renderer.voice_search_close_rect
+            self._pressed_button = None
+            self.renderer.invalidate()
+            if close_rect and close_rect.collidepoint(pos):
+                self._close_voice_search()
+            return
+        if not getattr(self, '_voice_search_touch_active', False):
+            return
+        self._voice_search_touch_active = False
+        if not self.touch.dragging:
+            return
+
+        drag_index_offset = -self.touch.drag_offset / (COVER_SIZE + COVER_SPACING)
+        visual_position = self._voice_search_selected_index + drag_index_offset
+        action, velocity = self.touch.on_up(pos)
+        self.voice_search_carousel.scroll_x = visual_position
+
+        _x, y = pos
+        if action in ('left', 'right'):
+            abs_vel = abs(velocity)
+            v_low, v_mid, v_high = VELOCITY_THRESHOLDS
+            velocity_bonus = 0 if abs_vel < v_low else (1 if abs_vel < v_mid else (2 if abs_vel < v_high else 3))
+            base_target = round(visual_position)
+            target = base_target + velocity_bonus if velocity < 0 else base_target - velocity_bonus
+            target = max(
+                self._voice_search_selected_index - MAX_SWIPE_JUMP,
+                min(target, self._voice_search_selected_index + MAX_SWIPE_JUMP),
+            )
+            target = max(0, min(target, len(self._voice_search_results) - 1))
+            self._snap_to_voice_search(target)
+        elif action == 'tap':
+            now = time.time()
+            if now - self._last_action_time < ACTION_DEBOUNCE:
+                return
+            center_y = CAROUSEL_CENTER_Y
+            if y < center_y - COVER_SIZE // 2:
+                self._navigate_voice_search(-1)
+            elif y > center_y + COVER_SIZE // 2:
+                self._navigate_voice_search(1)
+            else:
+                idx = self._voice_search_selected_index
+                if 0 <= idx < len(self._voice_search_results):
+                    self._last_action_time = now
+                    self._select_search_result(self._voice_search_results[idx])
+
+    def _focus_catalog_uri_and_play(self, uri: str):
+        """Focus carousel on uri and start playback."""
+        items = self.display_items
+        target_index = next((i for i, item in enumerate(items) if item.uri == uri), None)
+        if target_index is None:
+            target_index = max(0, len(items) - 1) if items else 0
+        if not items:
+            logger.warning(f'Music search: no catalog items after save uri={uri[:40]}')
+            return
+
+        old_index = self.selected_index
+        self.selected_index = target_index
+        self.carousel.set_target(target_index)
+        self._bump_focus_epoch(f'music_search {old_index}->{target_index}')
+        self._clear_manual_pause_lock('music_search_play')
+        self._clear_spotify_launch_lock('music_search_play')
+        self._user_activated_playback = True
+        self._play_item(uri)
+        self.renderer.invalidate()
     
     def _show_toast(self, message: str):
         """Show a brief toast message on screen."""
@@ -1175,16 +2277,49 @@ class Moki:
         self._manual_play_suppress_uri = uri
         self._manual_play_suppress_until = time.time() + MANUAL_PLAY_SUPPRESS_SEC
 
+    def suppress_librespot_recovery(self, seconds: float, reason: str):
+        """Pause librespot auto-restart (e.g. during WiFi reconnect)."""
+        until = time.time() + seconds
+        if until > self._librespot_recovery_suppressed_until:
+            self._librespot_recovery_suppressed_until = until
+        logger.info(f'Librespot recovery suppressed for {seconds:.0f}s ({reason})')
+
+    def _is_librespot_recovery_suppressed(self) -> bool:
+        return time.time() < self._librespot_recovery_suppressed_until
+
+    def _should_run_librespot_recovery(self, reason: str) -> bool:
+        """Only restart librespot when Spotify is the active screen and nothing blocks it."""
+        if self._is_librespot_recovery_suppressed():
+            logger.info(f'Librespot recovery skipped ({reason}): wifi/network change in progress')
+            return False
+        if self.app_screen != AppScreen.SPOTIFY:
+            logger.info(
+                f'Librespot recovery skipped ({reason}): active screen={self.app_screen.name}'
+            )
+            return False
+        if getattr(self.local_playback, 'is_active', False):
+            logger.info(f'Librespot recovery skipped ({reason}): local playback active')
+            return False
+        return True
+
+    def _on_librespot_recovery_toast(self, message: str):
+        """Show librespot recovery toasts only on the Spotify screen."""
+        if self.app_screen != AppScreen.SPOTIFY:
+            logger.debug(
+                f'Librespot recovery toast suppressed ({self.app_screen.name}): {message}'
+            )
+            return
+        self._show_toast(message)
+
     def _on_librespot_before_restart(self):
-        """Prepare UI before librespot systemd restart."""
+        """Prepare Spotify playback before librespot systemd restart."""
         self.playback.stop_all()
-        self.volume.mute()
         self.renderer.invalidate()
 
     def _on_librespot_after_restart(self, ok: bool):
         """Reconnect and retry playback after librespot restart."""
         if not ok:
-            self._show_toast('Spotify-Verbindung fehlgeschlagen')
+            self._on_librespot_recovery_toast('Spotify-Verbindung fehlgeschlagen')
             return
         self._connection_fail_count = 0
         self.connected = False
@@ -1207,6 +2342,8 @@ class Moki:
     def _maybe_recover_librespot(self, reason: str) -> bool:
         """Try librespot restart if triggers match. Returns True if started."""
         if self.mock_mode:
+            return False
+        if not self._should_run_librespot_recovery(reason):
             return False
         if reason == 'connection_lost':
             if not self.librespot_recovery.should_restart_for_connection(
@@ -1651,6 +2788,18 @@ class Moki:
         """
         if self.setup_menu.is_open or self._volume_hold_start is not None:
             return 10
+        if self._voice_search_phase not in (
+            VoiceSearchPhase.CLOSED,
+            VoiceSearchPhase.RESULTS,
+        ):
+            return 10
+        if self._mokibot_phase not in (
+            MokiBotPhase.IDLE,
+            MokiBotPhase.PLAYING,
+        ):
+            return 10
+        if self.app_screen == AppScreen.MOKIBOT and self._mokibot_phase == MokiBotPhase.THINKING:
+            return 10
         is_animating = not self.carousel.settled or self.touch.dragging
         if is_animating or self.playback.play_state.is_loading:
             return 60
@@ -2064,9 +3213,17 @@ class Moki:
                         self.setup_menu.handle_scroll(
                             dx, self.renderer.menu_content_overflow)
                         self._menu_touch_start = event.pos
+                elif self._home_touch_active and self.app_screen == AppScreen.HOME:
+                    self.sleep_manager.reset_timer()
+                    self._home_touch.on_move(event.pos)
+                    if self._home_touch.is_swiping:
+                        self._pressed_button = None
+                    self.renderer.invalidate()
                 elif self.touch.dragging:
                     self.sleep_manager.reset_timer()
                     self.touch.on_move(event.pos)
+                    if self._voice_search_touch_active:
+                        self.renderer.invalidate()
 
                     # Cancel delete mode when user starts swiping
                     if self.touch.is_swiping and self.delete_mode_id:
@@ -2083,7 +3240,7 @@ class Moki:
                                 if rect.collidepoint(*event.pos):
                                     if key == 'close':
                                         self._pressed_button = 'menu_close'
-                                    elif key.startswith('pin_'):
+                                    elif key.startswith('pin_') or key.startswith('search_') or key.startswith('voice_'):
                                         self._pressed_button = key
                                     self._pressed_time = time.time()
                                     break
@@ -2122,23 +3279,23 @@ class Moki:
             self._menu_touch_scrolled = False
             return
 
+        if self.app_screen == AppScreen.SPOTIFY and self._voice_search_phase != VoiceSearchPhase.CLOSED:
+            self._handle_voice_search_touch_down(pos)
+            return
+
+        if self.app_screen == AppScreen.MOKIBOT:
+            self._handle_mokibot_touch_down(pos)
+            return
+
         if self.app_screen == AppScreen.HOME:
-            if self.renderer.home_musik_rect and self.renderer.home_musik_rect.collidepoint(pos):
-                self._pressed_button = 'home_musik'
+            app_id = self._home_icon_at_pos(pos)
+            if app_id:
+                self._pressed_button = f'home_{app_id}'
                 self._pressed_time = time.time()
                 self.renderer.invalidate()
-            elif self.renderer.home_checker_rect and self.renderer.home_checker_rect.collidepoint(pos):
-                self._pressed_button = 'home_checker'
-                self._pressed_time = time.time()
-                self.renderer.invalidate()
-            elif getattr(self.renderer, 'home_local_music_rect', None) and self.renderer.home_local_music_rect.collidepoint(pos):
-                self._pressed_button = 'home_local_music'
-                self._pressed_time = time.time()
-                self.renderer.invalidate()
-            elif self.renderer.home_settings_rect and self.renderer.home_settings_rect.collidepoint(pos):
-                self._pressed_button = 'home_settings'
-                self._pressed_time = time.time()
-                self.renderer.invalidate()
+            else:
+                self._home_touch.on_down(pos)
+                self._home_touch_active = True
             return
         
         x, y = pos
@@ -2169,26 +3326,44 @@ class Moki:
             self._handle_button_tap(pos)
     
     def _handle_home_touch_up(self, pos):
-        """Handle tap release on the home screen."""
+        """Handle tap release on the home screen (icons + page swipe)."""
         pressed = self._pressed_button
         self._pressed_button = None
+
+        drag_offset = self._home_touch.drag_offset if self._home_touch_active else 0.0
+        page_scroll = self.home_pager.scroll_x - drag_offset / SCREEN_HEIGHT
+        action, velocity = self._home_touch.on_up(pos)
+        self._home_touch_active = False
+
+        pages = home_page_count(len(self.renderer._home_apps))
+        if pages > 1 and action in ('left', 'right') and not self._home_touch.long_press_fired:
+            abs_vel = abs(velocity)
+            v_low, v_mid, v_high = VELOCITY_THRESHOLDS
+            velocity_bonus = 0 if abs_vel < v_low else (1 if abs_vel < v_mid else (2 if abs_vel < v_high else 3))
+            base_target = round(page_scroll)
+            if action == 'right':
+                target = min(self.home_pager.max_index, base_target + 1 + velocity_bonus)
+            else:
+                target = max(0, base_target - 1 - velocity_bonus)
+            self.home_pager.scroll_x = page_scroll
+            self.home_pager.set_target(target)
+            self.renderer.invalidate()
+            return
+
+        if pages > 1 and action == 'tap' and not pressed:
+            self.home_pager.scroll_x = page_scroll
+            self.home_pager.set_target(max(0, min(round(page_scroll), self.home_pager.max_index)))
+            self.renderer.invalidate()
+            return
+
+        if not pressed or not pressed.startswith('home_'):
+            self.renderer.invalidate()
+            return
+
+        app_id = pressed.replace('home_', '', 1)
+        if self._home_icon_at_pos(pos) == app_id:
+            self._open_home_app(app_id)
         self.renderer.invalidate()
-        if pressed == 'home_musik':
-            rect = self.renderer.home_musik_rect
-            if rect and rect.collidepoint(pos):
-                self._open_spotify_screen()
-        elif pressed == 'home_checker':
-            rect = self.renderer.home_checker_rect
-            if rect and rect.collidepoint(pos):
-                self._open_checkpod_screen()
-        elif pressed == 'home_local_music':
-            rect = self.renderer.home_local_music_rect
-            if rect and rect.collidepoint(pos):
-                self._open_local_music_screen()
-        elif pressed == 'home_settings':
-            rect = self.renderer.home_settings_rect
-            if rect and rect.collidepoint(pos):
-                self._open_settings_with_pin()
 
     def _open_settings_with_pin(self):
         """Open settings menu behind PIN gate."""
@@ -2301,6 +3476,12 @@ class Moki:
     def _handle_touch_up(self, pos):
         """Handle touch/mouse up."""
         logger.debug(f'Touch up: pos={pos}, dragging={self.touch.dragging}')
+        if self.app_screen == AppScreen.SPOTIFY and self._voice_search_phase != VoiceSearchPhase.CLOSED:
+            self._handle_voice_search_touch_up(pos)
+            return
+        if self.app_screen == AppScreen.MOKIBOT:
+            self._handle_mokibot_touch_up(pos)
+            return
         if not self.touch.dragging:
             logger.debug('Touch up: ignored (not dragging)')
             return
@@ -2368,6 +3549,10 @@ class Moki:
 
         show_reload = self._is_local_media_screen()
         hp_y = HEADPHONE_BTN_Y_CHECKPOD if show_reload else HEADPHONE_BTN_Y
+        show_mic = (
+            self.app_screen == AppScreen.SPOTIFY
+            and self._voice_search_phase == VoiceSearchPhase.CLOSED
+        )
 
         # Portrait mode: check if X is in button column
         if CONTROLS_X - PLAY_BTN_SIZE <= x <= CONTROLS_X + PLAY_BTN_SIZE:
@@ -2376,7 +3561,17 @@ class Moki:
             # Home — return to launcher from Spotify/CheckPod
             if HOME_BTN_Y - BTN_SIZE // 2 <= y <= HOME_BTN_Y + BTN_SIZE // 2:
                 button_pressed = 'home'
-                self._open_home_screen()
+                if self._voice_search_phase != VoiceSearchPhase.CLOSED:
+                    self._close_voice_search()
+                else:
+                    self._open_home_screen()
+            # Mic — Spotify voice search
+            elif (
+                show_mic
+                and MIC_BTN_Y - BTN_SIZE // 2 <= y <= MIC_BTN_Y + BTN_SIZE // 2
+            ):
+                button_pressed = 'mic'
+                self._on_voice_search_mic()
             # Reload — CheckPod only: restart focused episode from the beginning
             elif (
                 show_reload
@@ -2391,7 +3586,9 @@ class Moki:
             # Prev: Y = center_y - btn_spacing (485)
             elif center_y - btn_spacing - BTN_SIZE <= y <= center_y - btn_spacing + BTN_SIZE:
                 button_pressed = 'prev'
-                if self._is_local_media_screen():
+                if self.app_screen == AppScreen.RADIO:
+                    pass
+                elif self._is_local_media_screen():
                     self._seek_local_media(-30)
                 else:
                     self._skip_track(self.api.prev)
@@ -2402,7 +3599,9 @@ class Moki:
             # Next: Y = center_y + btn_spacing (795)
             elif center_y + btn_spacing - BTN_SIZE <= y <= center_y + btn_spacing + BTN_SIZE:
                 button_pressed = 'next'
-                if self._is_local_media_screen():
+                if self.app_screen == AppScreen.RADIO:
+                    pass
+                elif self._is_local_media_screen():
                     self._seek_local_media(30)
                 else:
                     self._skip_track(self.api.next)
@@ -2473,6 +3672,8 @@ class Moki:
             logger.info(f'Snap: {old_index} -> {target_index}, item={item.name}, _user_driving=True')
         else:
             self.carousel.set_target(target_index)
+        if self.app_screen == AppScreen.CHECKPOD:
+            self._maybe_load_more_checkpod_episodes()
     
     def _navigate(self, direction: int):
         """Navigate carousel."""
@@ -2515,6 +3716,9 @@ class Moki:
             return
         if self.app_screen == AppScreen.LOCAL_MUSIC:
             self._toggle_local_music_play()
+            return
+        if self.app_screen == AppScreen.RADIO:
+            self._toggle_radio_play()
             return
         if self.mock_mode:
             self._toggle_mock_play()
@@ -2644,6 +3848,29 @@ class Moki:
         self._clear_manual_pause_lock('checkpod_play_tap')
         from_beginning = bool(context_uri and context_uri != item.uri)
         self._play_checkpod_item(item, from_beginning=from_beginning)
+
+    def _toggle_radio_play(self):
+        """Toggle Radio TEDDY live stream playback."""
+        items = self._display_items()
+        if not items:
+            return
+        item = items[0]
+        playing, paused, _, _, context_uri, _ = self.local_playback.get_state()
+
+        if playing:
+            self.local_playback.pause()
+            self._set_manual_pause_lock('radio_pause_tap')
+            return
+
+        if paused and context_uri == item.uri:
+            self._clear_manual_pause_lock('radio_play_tap')
+            self._clear_radio_launch_lock('play_tap')
+            self.volume.unmute()
+            self.local_playback.resume()
+            return
+
+        self._clear_manual_pause_lock('radio_play_tap')
+        self._play_radio_stream()
     
     def _toggle_mock_play(self):
         """Toggle mock playback (no real API calls)."""
@@ -3186,6 +4413,10 @@ class Moki:
         # Update carousel
         was_animating = not self.carousel.settled
         self.carousel.update(dt)
+        if self.app_screen == AppScreen.HOME:
+            self.home_pager.update(dt)
+        if self._voice_search_phase == VoiceSearchPhase.RESULTS:
+            self.voice_search_carousel.update(dt)
         
         focused_item = items[self.selected_index] if self.selected_index < len(items) else None
         if self._manual_pause_lock and self._manual_pause_context_uri:
@@ -3350,6 +4581,8 @@ class Moki:
         if self.app_screen == AppScreen.CHECKPOD:
             self._update_checkpod_autoplay(focused_item)
             self._save_local_media_progress_if_due()
+            if self.carousel.settled and not self.touch.dragging:
+                self._maybe_load_more_checkpod_episodes()
         elif self.app_screen == AppScreen.LOCAL_MUSIC:
             self._update_local_music_autoplay(focused_item)
             self._save_local_media_progress_if_due()
@@ -3367,6 +4600,10 @@ class Moki:
         
         self.setup_menu.update()
         self.voice_recorder.tick()
+        self.voice_search_recorder.tick()
+        self._tick_voice_search()
+        self.mokibot_recorder.tick()
+        self._tick_mokibot()
 
         # Volume hold detection: open menu after MENU_HOLD_TIME seconds
         if self._volume_hold_start is not None and not self._menu_hold_triggered:
@@ -3387,7 +4624,7 @@ class Moki:
         
         self._sync_to_playing()
         
-        if not self._is_local_media_screen():
+        if not self._uses_mpv_playback_ui():
             self.playback.update_mock(dt, self.now_playing)
             self.playback.save_progress(self.now_playing)
         
@@ -3415,6 +4652,20 @@ class Moki:
             self.voice_recorder.is_recording
             or self.voice_recorder.is_preparing
             or self.voice_recorder.is_encoding
+            or self.voice_search_recorder.is_recording
+            or self.voice_search_recorder.is_preparing
+            or self.voice_search_recorder.is_encoding
+            or self._voice_search_phase != VoiceSearchPhase.CLOSED
+            or self.mokibot_recorder.is_recording
+            or self.mokibot_recorder.is_preparing
+            or self.mokibot_recorder.is_encoding
+            or self._mokibot_phase in (
+                MokiBotPhase.PREPARING,
+                MokiBotPhase.COUNTDOWN,
+                MokiBotPhase.RECORDING,
+                MokiBotPhase.THINKING,
+                MokiBotPhase.SPEAKING,
+            )
             or self._is_voice_test_playing()
         )
         playback_active = self._playback_blocks_sleep()
@@ -3557,7 +4808,7 @@ class Moki:
         np = self.now_playing
         focused_item = items[self.selected_index] if self.selected_index < len(items) else None
         focused_uri = focused_item.uri if focused_item else None
-        if self._is_local_media_screen():
+        if self._uses_mpv_playback_ui():
             playing, paused, _, _, context_uri, _ = self.local_playback.get_state()
             focused_context_playing = bool(
                 focused_item and playing and context_uri == focused_uri
@@ -3566,10 +4817,14 @@ class Moki:
                 is_loading = self._checkpod_play_in_progress
                 play_in_progress = self._checkpod_play_in_progress
                 pending_focus_uri = self._checkpod_pending_focus_uri
-            else:
+            elif self.app_screen == AppScreen.LOCAL_MUSIC:
                 is_loading = self._local_music_play_in_progress
                 play_in_progress = self._local_music_play_in_progress
                 pending_focus_uri = self._local_music_pending_focus_uri
+            else:
+                is_loading = self._radio_play_in_progress
+                play_in_progress = self._radio_play_in_progress
+                pending_focus_uri = None
             is_playing = bool(playing and context_uri == focused_uri)
             requested_focus_uri = None
         else:
@@ -3589,7 +4844,7 @@ class Moki:
             and self._last_play_commit_uri == focused_uri
             and (time.time() - self._last_play_commit_at) < 1.25
         )
-        if self._is_local_media_screen():
+        if self._uses_mpv_playback_ui():
             recent_focus_commit = False
             is_loading = is_loading and not focused_context_playing
         else:
@@ -3598,13 +4853,20 @@ class Moki:
         # Snapshot BT state once to avoid race with monitor thread
         bt_dev = self.bluetooth.connected_device
 
+        if self._voice_search_phase == VoiceSearchPhase.RESULTS:
+            voice_dragging = self._voice_search_touch_active and self.touch.dragging
+            voice_drag_offset = self.touch.drag_offset if self._voice_search_touch_active else 0.0
+        else:
+            voice_dragging = False
+            voice_drag_offset = 0.0
+
         ctx = RenderContext(
             items=items,
             selected_index=self.selected_index,
             now_playing=np,
             scroll_x=self.carousel.scroll_x,
-            drag_offset=self.touch.drag_offset,
-            dragging=self.touch.dragging,
+            drag_offset=voice_drag_offset if self._voice_search_phase == VoiceSearchPhase.RESULTS else self.touch.drag_offset,
+            dragging=voice_dragging if self._voice_search_phase == VoiceSearchPhase.RESULTS else self.touch.dragging,
             is_sleeping=self.sleep_manager.is_sleeping,
             volume_index=self.volume.index,
             delete_mode_id=self.delete_mode_id,
@@ -3641,6 +4903,10 @@ class Moki:
             reboot_confirm_pending=self.setup_menu._reboot_confirm_pending,
             has_network=self._get_cached_network_status(),
             app_screen=self.app_screen,
+            home_page_scroll=self.home_pager.scroll_x,
+            home_page_index=int(round(self.home_pager.scroll_x)),
+            home_drag_offset=self._home_touch.drag_offset if self._home_touch_active else 0.0,
+            home_dragging=self._home_touch_active and self._home_touch.dragging,
             pin_buffer=self.setup_menu.pin_buffer,
             change_pin_step=self.setup_menu.change_pin_step,
             voice_recording=self.voice_recorder.is_recording,
@@ -3649,6 +4915,30 @@ class Moki:
             voice_recording_elapsed=self.voice_recorder.recording_elapsed,
             voice_has_recording=self.voice_recorder.has_recording(),
             voice_playing=self._is_voice_test_playing(),
+            voice_transcript=self._voice_transcript,
+            voice_transcribing=self._voice_transcribing,
+            voice_transcribe_error=self._voice_transcribe_error,
+            search_query=self._search_query,
+            search_results=self._search_results,
+            search_loading=self._search_loading,
+            search_error=self._search_error,
+            voice_search_phase=self._voice_search_phase,
+            voice_search_query=self._voice_search_query,
+            voice_search_results=self._voice_search_results,
+            voice_search_scroll_x=self.voice_search_carousel.scroll_x,
+            voice_search_selected_index=self._voice_search_selected_index,
+            voice_search_recording=self.voice_search_recorder.is_recording,
+            voice_search_preparing=self.voice_search_recorder.is_preparing,
+            voice_search_elapsed=self.voice_search_recorder.recording_elapsed,
+            voice_search_countdown_label=self._voice_search_countdown_label(),
+            mokibot_phase=self._mokibot_phase,
+            mokibot_status_text=self._mokibot_status_text(),
+            mokibot_reply_text=self._mokibot_reply_text,
+            mokibot_recording=self.mokibot_recorder.is_recording,
+            mokibot_preparing=self.mokibot_recorder.is_preparing,
+            mokibot_elapsed=self.mokibot_recorder.recording_elapsed,
+            mokibot_countdown_label=self._mokibot_countdown_label(),
+            mokibot_play_name=self._mokibot_play_name,
         )
         dirty_rects = self.renderer.draw(ctx)
         if self.delete_mode_id and self.renderer.delete_button_rect:

@@ -4,7 +4,7 @@ Render Context - Bundles all state needed for rendering.
 from dataclasses import dataclass, field
 from typing import Optional, List
 
-from ..models import CatalogItem, MenuState, NowPlaying, AppScreen
+from ..models import CatalogItem, MenuState, NowPlaying, AppScreen, VoiceSearchPhase, MokiBotPhase, SearchResult
 from ..managers.bluetooth import BluetoothDevice
 
 
@@ -53,6 +53,10 @@ class RenderContext:
     update_running: bool = False
     has_network: bool = True
     app_screen: AppScreen = AppScreen.HOME
+    home_page_scroll: float = 0.0
+    home_page_index: int = 0
+    home_drag_offset: float = 0.0
+    home_dragging: bool = False
     pin_buffer: str = ''
     change_pin_step: int = 0
     voice_recording: bool = False
@@ -61,4 +65,28 @@ class RenderContext:
     voice_recording_elapsed: int = 0
     voice_has_recording: bool = False
     voice_playing: bool = False
+    voice_transcript: Optional[str] = None
+    voice_transcribing: bool = False
+    voice_transcribe_error: Optional[str] = None
+    search_query: str = ''
+    search_results: List[SearchResult] = field(default_factory=list)
+    search_loading: bool = False
+    search_error: Optional[str] = None
+    voice_search_phase: VoiceSearchPhase = VoiceSearchPhase.CLOSED
+    voice_search_query: str = ''
+    voice_search_results: List[SearchResult] = field(default_factory=list)
+    voice_search_scroll_x: float = 0.0
+    voice_search_selected_index: int = 0
+    voice_search_recording: bool = False
+    voice_search_preparing: bool = False
+    voice_search_elapsed: int = 0
+    voice_search_countdown_label: str = ''
+    mokibot_phase: MokiBotPhase = MokiBotPhase.IDLE
+    mokibot_status_text: str = ''
+    mokibot_reply_text: str = ''
+    mokibot_recording: bool = False
+    mokibot_preparing: bool = False
+    mokibot_elapsed: int = 0
+    mokibot_countdown_label: str = ''
+    mokibot_play_name: Optional[str] = None
 

@@ -13,7 +13,7 @@ from typing import Callable, List, Optional
 import requests
 from PIL import Image
 
-from ..api.ard_audiothek import ArdEpisode, fetch_episodes
+from ..api.ard_audiothek import ArdEpisode, fetch_episodes_page
 from ..api.catalog import apply_dimming, apply_rounded_corners_pil
 from ..config import (
     CHECKPOD_CACHE_DIR,
@@ -90,6 +90,10 @@ class CheckPodManager:
         self._items: List[CatalogItem] = []
         self._episode_audio_urls: dict[str, str] = {}
         self._refreshing = False
+        self._loading_more = False
+        self._pending_load_more = False
+        self._has_more = False
+        self._end_cursor: Optional[str] = None
 
         CHECKPOD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         CHECKPOD_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -103,6 +107,16 @@ class CheckPodManager:
 
     def get_display_items(self) -> List[CatalogItem]:
         return self.items
+
+    @property
+    def has_more_episodes(self) -> bool:
+        with self._lock:
+            return self._has_more
+
+    @property
+    def is_loading_more(self) -> bool:
+        with self._lock:
+            return self._loading_more
 
     def get_audio_url(self, episode_id: str) -> Optional[str]:
         with self._lock:
@@ -157,52 +171,222 @@ class CheckPodManager:
             if self._refreshing:
                 return False
             self._refreshing = True
+            empty = not self._items
+        pending_load_more = False
         try:
-            episodes = fetch_episodes()
-            if not episodes:
+            page = fetch_episodes_page()
+            if not page.episodes:
                 logger.info('CheckPod refresh returned no episodes (keeping cache)')
                 return False
-            force_images = self._should_regenerate_images()
-            items = []
-            audio_urls = {}
-            for ep in episodes:
-                image_path = self._ensure_episode_image(ep, force=force_images)
-                items.append(CatalogItem(
-                    id=ep.id,
-                    uri=ep.uri,
-                    name=ep.title,
-                    type='episode',
-                    artist='Checker Tobi',
-                    image=image_path,
-                ))
-                audio_urls[ep.id] = ep.audio_url
-            catalog = {
-                'updated_at': datetime.now().isoformat(),
-                'image_version': CHECKPOD_IMAGE_VERSION,
-                'episodes': [
-                    {
-                        'id': ep.id,
-                        'uri': ep.uri,
-                        'title': ep.title,
-                        'audio_url': ep.audio_url,
-                        'image_url': ep.image_url,
-                        'duration_ms': ep.duration_ms,
-                        'published_at': ep.published_at,
-                        'image': items[i].image,
-                    }
-                    for i, ep in enumerate(episodes)
-                ],
-            }
-            self._save_catalog(catalog)
-            with self._lock:
-                self._items = items
-                self._episode_audio_urls = audio_urls
-            self._on_invalidate()
-            logger.info(f'CheckPod catalog refreshed ({len(items)} episodes)')
-            return True
+            mode = 'replace' if empty else 'merge_front'
+            return self._apply_episode_page(page, mode=mode)
         finally:
             with self._lock:
                 self._refreshing = False
+                pending_load_more = self._pending_load_more
+                self._pending_load_more = False
+            if pending_load_more:
+                logger.info('CheckPod running deferred load-more after refresh')
+                self.load_more_episodes()
+
+    def load_more_episodes(self) -> bool:
+        """Fetch and append older episodes when the user reaches the list end."""
+        with self._lock:
+            if self._refreshing:
+                self._pending_load_more = True
+                logger.info('CheckPod load-more deferred (refresh in progress)')
+                return False
+            if self._loading_more or not self._has_more:
+                return False
+            cursor = self._end_cursor
+            if not cursor:
+                self._has_more = False
+                return False
+            self._loading_more = True
+        try:
+            page = fetch_episodes_page(after=cursor)
+            if not page.episodes:
+                with self._lock:
+                    self._has_more = False
+                logger.info('CheckPod load-more returned no episodes')
+                return False
+            added = self._apply_episode_page(page, mode='append')
+            if added:
+                logger.info(f'CheckPod load-more appended episodes (total={len(self.items)})')
+            return added
+        finally:
+            with self._lock:
+                self._loading_more = False
+
+    def _apply_episode_page(self, page, *, mode: str) -> bool:
+        """Apply a fetched episode page (replace, merge_front, or append)."""
+        assert mode in ('replace', 'merge_front', 'append')
+        force_images = mode == 'replace' and self._should_regenerate_images()
+        fast_images = mode == 'append'
+
+        with self._lock:
+            existing_items = list(self._items)
+            existing_ids = {item.id for item in existing_items}
+            tail_has_more = self._has_more
+            tail_end_cursor = self._end_cursor
+
+        if mode == 'append':
+            episodes_to_process = [ep for ep in page.episodes if ep.id not in existing_ids]
+            if not episodes_to_process:
+                with self._lock:
+                    self._has_more = page.has_next_page
+                    self._end_cursor = page.end_cursor
+                return False
+            older_tail: List[CatalogItem] = []
+        elif mode == 'merge_front':
+            page_ids = {ep.id for ep in page.episodes}
+            older_tail = [item for item in existing_items if item.id not in page_ids]
+            episodes_to_process = page.episodes
+        else:
+            older_tail = []
+            episodes_to_process = page.episodes
+
+        page_items: List[CatalogItem] = []
+        page_audio_urls: dict[str, str] = {}
+        page_catalog_entries = []
+        episodes_needing_images: List[ArdEpisode] = []
+
+        for ep in episodes_to_process:
+            if fast_images:
+                image_path = self._cached_image_path(ep.id)
+                if not image_path and ep.image_url:
+                    episodes_needing_images.append(ep)
+            else:
+                image_path = self._ensure_episode_image(ep, force=force_images)
+
+            page_items.append(CatalogItem(
+                id=ep.id,
+                uri=ep.uri,
+                name=ep.title,
+                type='episode',
+                artist='Checker Tobi',
+                image=image_path,
+            ))
+            page_audio_urls[ep.id] = ep.audio_url
+            page_catalog_entries.append({
+                'id': ep.id,
+                'uri': ep.uri,
+                'title': ep.title,
+                'audio_url': ep.audio_url,
+                'image_url': ep.image_url,
+                'duration_ms': ep.duration_ms,
+                'published_at': ep.published_at,
+                'image': image_path,
+            })
+
+        with self._lock:
+            if mode == 'replace':
+                merged_items = page_items
+                merged_audio = page_audio_urls
+                new_has_more = page.has_next_page
+                new_end_cursor = page.end_cursor
+            elif mode == 'merge_front':
+                merged_items = page_items + older_tail
+                merged_audio = dict(self._episode_audio_urls)
+                merged_audio.update(page_audio_urls)
+                if older_tail:
+                    new_has_more = tail_has_more
+                    new_end_cursor = tail_end_cursor
+                else:
+                    new_has_more = page.has_next_page
+                    new_end_cursor = page.end_cursor
+            else:
+                merged_items = list(self._items) + page_items
+                merged_audio = dict(self._episode_audio_urls)
+                merged_audio.update(page_audio_urls)
+                new_has_more = page.has_next_page
+                new_end_cursor = page.end_cursor
+
+            self._items = merged_items
+            self._episode_audio_urls = merged_audio
+            self._has_more = new_has_more
+            self._end_cursor = new_end_cursor
+
+        tail_catalog_entries = [
+            self._catalog_entry_for_item(item, self._episode_audio_urls.get(item.id))
+            for item in older_tail
+        ]
+        merged_catalog = page_catalog_entries + tail_catalog_entries
+
+        self._save_catalog({
+            'updated_at': datetime.now().isoformat(),
+            'image_version': CHECKPOD_IMAGE_VERSION,
+            'page_info': {
+                'has_next_page': new_has_more,
+                'end_cursor': new_end_cursor,
+            },
+            'episodes': merged_catalog,
+        })
+        self._on_invalidate()
+
+        if episodes_needing_images:
+            self._fetch_episode_images_async(episodes_needing_images)
+
+        action = {'replace': 'refreshed', 'merge_front': 'merged', 'append': 'extended'}[mode]
+        logger.info(
+            f'CheckPod catalog {action} '
+            f'({len(merged_items)} episodes, has_next={new_has_more})'
+        )
+        return True
+
+    def _catalog_entry_for_item(
+        self,
+        item: CatalogItem,
+        audio_url: Optional[str],
+    ) -> dict:
+        return {
+            'id': item.id,
+            'uri': item.uri,
+            'title': item.name,
+            'audio_url': audio_url,
+            'image': item.image,
+        }
+
+    def _cached_image_path(self, episode_id: str) -> Optional[str]:
+        main_path = CHECKPOD_IMAGES_DIR / f'{episode_id}.png'
+        if main_path.exists():
+            return f'{CHECKPOD_IMAGE_PATH_PREFIX}{episode_id}.png'
+        return None
+
+    def _fetch_episode_images_async(self, episodes: List[ArdEpisode]):
+        def _run():
+            changed = False
+            for ep in episodes:
+                image_path = self._ensure_episode_image(ep)
+                if not image_path:
+                    continue
+                with self._lock:
+                    for item in self._items:
+                        if item.id == ep.id:
+                            item.image = image_path
+                            changed = True
+                            break
+            if not changed:
+                return
+            with self._lock:
+                merged_catalog = [
+                    self._catalog_entry_for_item(item, self._episode_audio_urls.get(item.id))
+                    for item in self._items
+                ]
+                has_more = self._has_more
+                end_cursor = self._end_cursor
+            self._save_catalog({
+                'updated_at': datetime.now().isoformat(),
+                'image_version': CHECKPOD_IMAGE_VERSION,
+                'page_info': {
+                    'has_next_page': has_more,
+                    'end_cursor': end_cursor,
+                },
+                'episodes': merged_catalog,
+            })
+            self._on_invalidate()
+
+        threading.Thread(target=_run, daemon=True, name='checkpod-covers').start()
 
     def _image_path_exists(self, image_path: Optional[str]) -> bool:
         if not image_path or not image_path.startswith(CHECKPOD_IMAGE_PATH_PREFIX):
@@ -241,6 +425,9 @@ class CheckPodManager:
             with self._lock:
                 self._items = items
                 self._episode_audio_urls = audio_urls
+                page_info = data.get('page_info') or {}
+                self._has_more = bool(page_info.get('has_next_page'))
+                self._end_cursor = page_info.get('end_cursor')
             logger.info(f'CheckPod catalog loaded from disk ({len(items)} episodes)')
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f'Failed to load CheckPod catalog: {e}', exc_info=True)
