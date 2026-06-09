@@ -89,6 +89,7 @@ class CheckPodManager:
         self._progress_lock = threading.Lock()
         self._items: List[CatalogItem] = []
         self._episode_audio_urls: dict[str, str] = {}
+        self._episode_image_urls: dict[str, str] = {}
         self._refreshing = False
         self._loading_more = False
         self._pending_load_more = False
@@ -99,6 +100,8 @@ class CheckPodManager:
         CHECKPOD_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         self._load_catalog_from_disk()
         self.cleanup_stale_downloads()
+        self._repair_missing_covers()
+        self._backfill_image_urls_if_needed()
 
     @property
     def items(self) -> List[CatalogItem]:
@@ -248,10 +251,13 @@ class CheckPodManager:
 
         page_items: List[CatalogItem] = []
         page_audio_urls: dict[str, str] = {}
+        page_image_urls: dict[str, str] = {}
         page_catalog_entries = []
         episodes_needing_images: List[ArdEpisode] = []
 
         for ep in episodes_to_process:
+            if ep.image_url:
+                page_image_urls[ep.id] = ep.image_url
             if fast_images:
                 image_path = self._cached_image_path(ep.id)
                 if not image_path and ep.image_url:
@@ -304,6 +310,7 @@ class CheckPodManager:
 
             self._items = merged_items
             self._episode_audio_urls = merged_audio
+            self._episode_image_urls.update(page_image_urls)
             self._has_more = new_has_more
             self._end_cursor = new_end_cursor
 
@@ -326,6 +333,7 @@ class CheckPodManager:
 
         if episodes_needing_images:
             self._fetch_episode_images_async(episodes_needing_images)
+        self._repair_missing_covers()
 
         action = {'replace': 'refreshed', 'merge_front': 'merged', 'append': 'extended'}[mode]
         logger.info(
@@ -344,8 +352,95 @@ class CheckPodManager:
             'uri': item.uri,
             'title': item.name,
             'audio_url': audio_url,
+            'image_url': self._episode_image_urls.get(item.id),
             'image': item.image,
         }
+
+    def _persist_catalog(self):
+        """Write current in-memory catalog to disk."""
+        with self._lock:
+            merged_catalog = [
+                self._catalog_entry_for_item(item, self._episode_audio_urls.get(item.id))
+                for item in self._items
+            ]
+            payload = {
+                'updated_at': datetime.now().isoformat(),
+                'image_version': CHECKPOD_IMAGE_VERSION,
+                'page_info': {
+                    'has_next_page': self._has_more,
+                    'end_cursor': self._end_cursor,
+                },
+                'episodes': merged_catalog,
+            }
+        self._save_catalog(payload)
+
+    def _item_needs_cover(self, item: CatalogItem) -> bool:
+        if not item.image:
+            return True
+        return not self._image_path_exists(item.image)
+
+    def _ard_episode_for_item(self, item: CatalogItem) -> Optional[ArdEpisode]:
+        image_url = self._episode_image_urls.get(item.id)
+        if not image_url:
+            return None
+        audio_url = self._episode_audio_urls.get(item.id) or ''
+        return ArdEpisode(
+            id=item.id,
+            title=item.name,
+            audio_url=audio_url,
+            image_url=image_url,
+            duration_ms=0,
+        )
+
+    def _repair_missing_covers(self):
+        """Download covers for catalog items that have a URL but no cached file."""
+        with self._lock:
+            items = list(self._items)
+        to_fetch = []
+        for item in items:
+            if not self._item_needs_cover(item):
+                continue
+            ep = self._ard_episode_for_item(item)
+            if ep:
+                to_fetch.append(ep)
+        if to_fetch:
+            logger.info(f'CheckPod repairing {len(to_fetch)} missing covers')
+            self._fetch_episode_images_async(to_fetch)
+
+    def _backfill_image_urls_if_needed(self):
+        """Paginate ARD once to fill image_url for older catalog entries."""
+        with self._lock:
+            needs_backfill = any(
+                self._item_needs_cover(item) and item.id not in self._episode_image_urls
+                for item in self._items
+            )
+        if not needs_backfill:
+            return
+
+        def _run():
+            logger.info('CheckPod backfilling image URLs from ARD')
+            cursor = None
+            found = 0
+            while True:
+                try:
+                    page = fetch_episodes_page(after=cursor)
+                except Exception as e:
+                    logger.warning(f'CheckPod image URL backfill failed: {e}', exc_info=True)
+                    return
+                with self._lock:
+                    for ep in page.episodes:
+                        if ep.image_url:
+                            self._episode_image_urls[ep.id] = ep.image_url
+                            found += 1
+                if not page.has_next_page:
+                    break
+                cursor = page.end_cursor
+            logger.info(f'CheckPod image URL backfill done ({found} URLs)')
+            self._persist_catalog()
+            self._repair_missing_covers()
+            self._on_invalidate()
+
+        threading.Thread(target=_run, daemon=True, name='checkpod-image-url-backfill').start()
 
     def _cached_image_path(self, episode_id: str) -> Optional[str]:
         main_path = CHECKPOD_IMAGES_DIR / f'{episode_id}.png'
@@ -357,6 +452,9 @@ class CheckPodManager:
         def _run():
             changed = False
             for ep in episodes:
+                if ep.image_url:
+                    with self._lock:
+                        self._episode_image_urls[ep.id] = ep.image_url
                 image_path = self._ensure_episode_image(ep)
                 if not image_path:
                     continue
@@ -368,22 +466,7 @@ class CheckPodManager:
                             break
             if not changed:
                 return
-            with self._lock:
-                merged_catalog = [
-                    self._catalog_entry_for_item(item, self._episode_audio_urls.get(item.id))
-                    for item in self._items
-                ]
-                has_more = self._has_more
-                end_cursor = self._end_cursor
-            self._save_catalog({
-                'updated_at': datetime.now().isoformat(),
-                'image_version': CHECKPOD_IMAGE_VERSION,
-                'page_info': {
-                    'has_next_page': has_more,
-                    'end_cursor': end_cursor,
-                },
-                'episodes': merged_catalog,
-            })
+            self._persist_catalog()
             self._on_invalidate()
 
         threading.Thread(target=_run, daemon=True, name='checkpod-covers').start()
@@ -402,6 +485,7 @@ class CheckPodManager:
             episodes = data.get('episodes') or []
             items = []
             audio_urls = {}
+            image_urls = {}
             for entry in episodes:
                 if not isinstance(entry, dict):
                     continue
@@ -411,6 +495,8 @@ class CheckPodManager:
                 image = entry.get('image')
                 if image and not self._image_path_exists(image):
                     image = None
+                if entry.get('image_url'):
+                    image_urls[episode_id] = entry['image_url']
                 if episode_id:
                     items.append(CatalogItem(
                         id=episode_id,
@@ -425,6 +511,7 @@ class CheckPodManager:
             with self._lock:
                 self._items = items
                 self._episode_audio_urls = audio_urls
+                self._episode_image_urls = image_urls
                 page_info = data.get('page_info') or {}
                 self._has_more = bool(page_info.get('has_next_page'))
                 self._end_cursor = page_info.get('end_cursor')

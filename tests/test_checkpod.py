@@ -22,7 +22,7 @@ sys.modules.setdefault('pygame.gfxdraw', types.ModuleType('pygame.gfxdraw'))
 
 from moki.api.ard_audiothek import parse_episodes, parse_episode_page, ArdEpisode, ArdEpisodePage
 from moki.app import Moki
-from moki.models import AppScreen, CatalogItem, NowPlaying
+from moki.models import AppScreen, CatalogItem, NowPlaying, VoiceSearchPhase
 from moki.managers.checkpod_manager import (
     CheckPodManager,
     _fit_cover_to_square,
@@ -31,6 +31,58 @@ from moki.managers.checkpod_manager import (
 )
 from moki.controllers.local_playback import LocalPlaybackController
 from PIL import Image
+
+
+def _stub_voice_search(app):
+    """Minimal voice-search attrs for partial Moki instances in unit tests."""
+    app._voice_search_phase = VoiceSearchPhase.CLOSED
+    app._voice_search_generation = 0
+    app._voice_search_countdown_end = 0.0
+    app._voice_search_query = ''
+    app._voice_search_results = []
+    app._voice_search_error = None
+    app._voice_search_selected_index = 0
+    app._voice_search_touch_active = False
+    app.voice_search_carousel = SimpleNamespace(scroll_x=0.0)
+    app.voice_search_recorder = SimpleNamespace(
+        cancel=MagicMock(),
+        is_recording=False,
+        is_preparing=False,
+        recording_elapsed=0.0,
+    )
+
+
+def _stub_draw_extras(app):
+    """Attrs _draw() reads beyond what individual tests already set."""
+    _stub_voice_search(app)
+    app.home_pager = SimpleNamespace(scroll_x=0.0)
+    app._home_touch_active = False
+    app._home_touch = SimpleNamespace(drag_offset=0.0, dragging=False)
+    app.voice_recorder = SimpleNamespace(
+        is_recording=False,
+        is_preparing=False,
+        is_encoding=False,
+        recording_elapsed=0.0,
+        has_recording=lambda: False,
+    )
+    app._is_voice_test_playing = lambda: False
+    app._voice_transcript = None
+    app._voice_transcribing = False
+    app._voice_transcribe_error = None
+    app._search_query = ''
+    app._search_results = []
+    app._search_loading = False
+    app._search_error = None
+    app._mokibot_phase = None
+    app._mokibot_status_text = lambda: ''
+    app._mokibot_reply_text = ''
+    app._mokibot_countdown_label = lambda: ''
+    app._mokibot_play_name = None
+    app.mokibot_recorder = SimpleNamespace(
+        is_recording=False,
+        is_preparing=False,
+        recording_elapsed=0.0,
+    )
 
 
 SAMPLE_GRAPHQL_RESPONSE = {
@@ -450,6 +502,8 @@ def test_open_checkpod_screen_sets_launch_lock():
 
 def test_open_home_screen_stops_local_playback():
     app = Moki.__new__(Moki)
+    app._close_voice_search = MagicMock()
+    app._cancel_mokibot_pipeline = MagicMock()
     app.app_screen = AppScreen.CHECKPOD
     app._checkpod_launch_lock = True
     app._checkpod_play_in_progress = True
@@ -459,6 +513,10 @@ def test_open_home_screen_stops_local_playback():
     app._pressed_button = None
     app._pause_active_playback = MagicMock()
     app._set_manual_pause_lock = MagicMock()
+    app._reset_local_music_screen_state = MagicMock()
+    app._reset_radio_screen_state = MagicMock()
+    app._reset_home_pager = MagicMock()
+    app.home_pager = SimpleNamespace(scroll_x=0.0)
 
     Moki._open_home_screen(app)
 
@@ -469,10 +527,21 @@ def test_open_home_screen_stops_local_playback():
 
 def test_home_checker_tap_opens_checkpod():
     app = Moki.__new__(Moki)
+    app.app_screen = AppScreen.HOME
+    app._home_touch_active = False
+    app._home_touch = SimpleNamespace(
+        drag_offset=0.0,
+        dragging=False,
+        is_swiping=False,
+        long_press_fired=False,
+        on_up=lambda pos: (None, 0.0),
+    )
+    app.home_pager = SimpleNamespace(scroll_x=0.0, max_index=0, set_target=MagicMock())
     app._pressed_button = 'home_checker'
+    app._home_icon_at_pos = MagicMock(return_value='checker')
     app.renderer = SimpleNamespace(
-        home_checker_rect=types.SimpleNamespace(collidepoint=lambda p: p == (100, 100)),
         invalidate=MagicMock(),
+        _home_apps=[],
     )
     app._open_checkpod_screen = MagicMock()
 
@@ -503,6 +572,8 @@ def test_refresh_status_skips_spotify_sync_on_checkpod():
         context_uri='urn:ard:episode:16407475',
         track_name='CheckPod Episode',
     )
+    app.librespot_recovery = SimpleNamespace(should_restart_for_timeouts=lambda: False)
+    app._maybe_recover_librespot = MagicMock(return_value=False)
 
     Moki._refresh_status(app)
 
@@ -528,6 +599,7 @@ def test_play_checkpod_item_dedupes_same_uri():
 
 def test_checkpod_paused_episode_renders_play_button():
     app = Moki.__new__(Moki)
+    _stub_draw_extras(app)
     item = CatalogItem(
         id='16407475',
         uri='urn:ard:episode:16407475',
@@ -568,11 +640,15 @@ def test_checkpod_paused_episode_renders_play_button():
         known_networks=[],
         current_network=None,
         scroll_offset=0,
+        wifi_now_band=None,
+        wifi_link_detail=None,
+        wifi_band_label=None,
         _update_checking=False,
         _update_available=False,
         _update_running=False,
         _reset_confirm_pending=False,
         _shutdown_confirm_pending=False,
+        _reboot_confirm_pending=False,
         pin_buffer='',
         change_pin_step=0,
     )
@@ -828,3 +904,118 @@ def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
     assert app._checkpod_pending_focus_uri is None
     assert app._checkpod_play_failed_uri is None
     assert app._user_activated_playback is True
+
+
+def test_load_catalog_clears_missing_image_but_keeps_url(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    images_dir = cache_dir / 'images'
+    images_dir.mkdir(parents=True)
+    catalog_path = cache_dir / 'catalog.json'
+    catalog_path.write_text(json.dumps({
+        'episodes': [{
+            'id': '12140953',
+            'uri': 'urn:ard:episode:12140953',
+            'title': 'Testfolge',
+            'image': '/checkpod/images/12140953.png',
+            'image_url': 'https://example.com/cover.jpg',
+        }],
+    }))
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._repair_missing_covers',
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._backfill_image_urls_if_needed',
+        lambda self: None,
+    )
+
+    manager = CheckPodManager()
+
+    assert manager.items[0].image is None
+    assert manager._episode_image_urls['12140953'] == 'https://example.com/cover.jpg'
+
+
+def test_repair_missing_covers_downloads_when_url_known(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    images_dir = cache_dir / 'images'
+    images_dir.mkdir(parents=True)
+    catalog_path = cache_dir / 'catalog.json'
+    catalog_path.write_text(json.dumps({
+        'episodes': [{
+            'id': '12140953',
+            'uri': 'urn:ard:episode:12140953',
+            'title': 'Testfolge',
+            'image_url': 'https://example.com/cover.jpg',
+        }],
+    }))
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', images_dir)
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._backfill_image_urls_if_needed',
+        lambda self: None,
+    )
+
+    def _immediate_thread(target=None, daemon=True, name=None):
+        class Immediate:
+            def start(self):
+                if target:
+                    target()
+        return Immediate()
+
+    monkeypatch.setattr('moki.managers.checkpod_manager.threading.Thread', _immediate_thread)
+
+    img = Image.new('RGB', (800, 450), color=(255, 0, 0))
+    buf = __import__('io').BytesIO()
+    img.save(buf, format='JPEG')
+    mock_resp = MagicMock()
+    mock_resp.content = buf.getvalue()
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch('moki.managers.checkpod_manager.requests.get', return_value=mock_resp):
+        manager = CheckPodManager()
+
+    assert manager.items[0].image == '/checkpod/images/12140953.png'
+    assert (images_dir / '12140953_small_dim.png').exists()
+    saved = json.loads(catalog_path.read_text())
+    assert saved['episodes'][0]['image'] == '/checkpod/images/12140953.png'
+    assert saved['episodes'][0]['image_url'] == 'https://example.com/cover.jpg'
+
+
+def test_persist_catalog_writes_image_url(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    cache_dir.mkdir(parents=True)
+    catalog_path = cache_dir / 'catalog.json'
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', catalog_path)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._repair_missing_covers',
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._backfill_image_urls_if_needed',
+        lambda self: None,
+    )
+
+    manager = CheckPodManager()
+    item = CatalogItem(
+        id='99',
+        uri='urn:ard:episode:99',
+        name='Folge',
+        type='episode',
+        artist='Checker Tobi',
+    )
+    manager._items = [item]
+    manager._episode_image_urls['99'] = 'https://example.com/cover.jpg'
+    manager._episode_audio_urls['99'] = 'https://example.com/ep.mp3'
+    manager._persist_catalog()
+
+    saved = json.loads(catalog_path.read_text())
+    assert saved['episodes'][0]['image_url'] == 'https://example.com/cover.jpg'
