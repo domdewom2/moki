@@ -607,7 +607,7 @@ def test_checkpod_paused_episode_renders_play_button():
         type='episode',
     )
     app.app_screen = AppScreen.CHECKPOD
-    app.checkpod_manager = SimpleNamespace(get_display_items=lambda: [item])
+    app.checkpod_manager = SimpleNamespace(get_display_items=lambda: [item], is_refreshing=False)
     app.selected_index = 0
     app._now_playing_lock = __import__('threading').Lock()
     app._now_playing = NowPlaying()
@@ -904,6 +904,45 @@ def test_restart_checkpod_episode_clears_progress_and_plays_from_start():
     assert app._checkpod_pending_focus_uri is None
     assert app._checkpod_play_failed_uri is None
     assert app._user_activated_playback is True
+
+
+def test_refresh_lists_episodes_without_sync_cover_download(tmp_path, monkeypatch):
+    cache_dir = tmp_path / 'checkpod'
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CACHE_DIR', cache_dir)
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_CATALOG_PATH', cache_dir / 'catalog.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_PROGRESS_PATH', cache_dir / 'progress.json')
+    monkeypatch.setattr('moki.managers.checkpod_manager.CHECKPOD_IMAGES_DIR', cache_dir / 'images')
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._backfill_image_urls_if_needed',
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        'moki.managers.checkpod_manager.CheckPodManager._repair_missing_covers',
+        lambda self: None,
+    )
+
+    page = ArdEpisodePage(
+        episodes=[ArdEpisode(
+            id='16407475',
+            title='Reis',
+            audio_url='https://example.com/ep.mp3',
+            image_url='https://example.com/cover.jpg',
+            duration_ms=60000,
+        )],
+        has_next_page=False,
+        end_cursor=None,
+    )
+
+    manager = CheckPodManager()
+    with patch('moki.managers.checkpod_manager.fetch_episodes_page', return_value=page):
+        with patch.object(CheckPodManager, '_ensure_episode_image') as mock_ensure:
+            with patch.object(CheckPodManager, '_fetch_episode_images_async'):
+                assert manager.refresh_episodes() is True
+                mock_ensure.assert_not_called()
+
+    assert len(manager.items) == 1
+    assert manager.items[0].name == 'Reis'
+    assert manager.items[0].image is None
 
 
 def test_load_catalog_clears_missing_image_but_keeps_url(tmp_path, monkeypatch):

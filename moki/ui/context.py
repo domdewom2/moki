@@ -89,4 +89,5 @@ class RenderContext:
     mokibot_elapsed: int = 0
     mokibot_countdown_label: str = ''
     mokibot_play_name: Optional[str] = None
+    checkpod_refreshing: bool = False
 

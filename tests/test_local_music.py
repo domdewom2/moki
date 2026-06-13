@@ -194,3 +194,20 @@ def test_is_local_media_screen():
     assert Moki._is_local_media_screen(app) is True
     app.app_screen = AppScreen.SPOTIFY
     assert Moki._is_local_media_screen(app) is False
+
+
+def test_home_button_leaves_empty_local_music():
+    from moki.config import CONTROLS_X, HOME_BTN_Y
+
+    app = Moki.__new__(Moki)
+    app.app_screen = AppScreen.LOCAL_MUSIC
+    app._voice_search_phase = __import__('moki.models', fromlist=['VoiceSearchPhase']).VoiceSearchPhase.CLOSED
+    app._last_action_time = 0.0
+    app._is_local_media_screen = lambda: True
+    app._open_home_screen = MagicMock()
+    app._close_voice_search = MagicMock()
+    app.renderer = SimpleNamespace(invalidate=MagicMock())
+
+    Moki._handle_button_tap(app, (CONTROLS_X, HOME_BTN_Y))
+
+    app._open_home_screen.assert_called_once()

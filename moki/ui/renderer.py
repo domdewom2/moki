@@ -226,10 +226,22 @@ class Renderer:
             self._last_playing_state = ctx.now_playing.playing
             self._last_selected_index = ctx.selected_index
         
-        # Empty state
+        # Empty state — still show controls (especially Home) so the user can leave.
         if not ctx.items:
             self._draw_background()
             self._draw_empty_state(ctx)
+            self._draw_controls(
+                ctx.is_playing,
+                ctx.volume_index,
+                ctx.pressed_button,
+                bt_connected=ctx.bt_connected,
+                bt_audio_active=ctx.bt_audio_active,
+                show_reload=ctx.app_screen in (AppScreen.CHECKPOD, AppScreen.LOCAL_MUSIC),
+                show_mic=(
+                    ctx.app_screen == AppScreen.SPOTIFY
+                    and ctx.voice_search_phase == VoiceSearchPhase.CLOSED
+                ),
+            )
             self._needs_full_redraw = True
             return None
         
@@ -380,7 +392,14 @@ class Renderer:
         else:
             self.settings_button_rect = None
             if ctx.app_screen == AppScreen.CHECKPOD:
-                line1 = self._render_text_rotated('Lädt CheckPod…', self.font_medium, COLORS['text_secondary'])
+                if ctx.checkpod_refreshing:
+                    line1 = self._render_text_rotated('Lädt CheckPod…', self.font_medium, COLORS['text_secondary'])
+                else:
+                    line1 = self._render_text_rotated(
+                        'Keine Folgen geladen — später erneut versuchen',
+                        self.font_medium,
+                        COLORS['text_secondary'],
+                    )
             elif ctx.app_screen == AppScreen.LOCAL_MUSIC:
                 line1 = self._render_text_rotated(
                     'Noch keine Dateien — MP3/M4B nach data/local_music/ kopieren, dann App erneut öffnen',

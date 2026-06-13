@@ -343,6 +343,9 @@ class Moki:
             get_progress_expiry=lambda: self.settings.progress_expiry_hours,
         )
         self.checkpod_manager.cleanup_stale_downloads()
+        if not self.checkpod_manager.items:
+            run_async(self._refresh_checkpod_episodes)
+            logger.info('CheckPod catalog prefetch scheduled (empty catalog)')
         self.local_music_manager = LocalMusicManager(
             on_toast=self._show_toast,
             on_invalidate=lambda: (
@@ -4939,6 +4942,9 @@ class Moki:
             mokibot_elapsed=self.mokibot_recorder.recording_elapsed,
             mokibot_countdown_label=self._mokibot_countdown_label(),
             mokibot_play_name=self._mokibot_play_name,
+            checkpod_refreshing=(
+                self.app_screen == AppScreen.CHECKPOD and self.checkpod_manager.is_refreshing
+            ),
         )
         dirty_rects = self.renderer.draw(ctx)
         if self.delete_mode_id and self.renderer.delete_button_rect:

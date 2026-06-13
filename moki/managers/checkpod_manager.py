@@ -121,6 +121,11 @@ class CheckPodManager:
         with self._lock:
             return self._loading_more
 
+    @property
+    def is_refreshing(self) -> bool:
+        with self._lock:
+            return self._refreshing
+
     def get_audio_url(self, episode_id: str) -> Optional[str]:
         with self._lock:
             return self._episode_audio_urls.get(episode_id)
@@ -225,7 +230,6 @@ class CheckPodManager:
         """Apply a fetched episode page (replace, merge_front, or append)."""
         assert mode in ('replace', 'merge_front', 'append')
         force_images = mode == 'replace' and self._should_regenerate_images()
-        fast_images = mode == 'append'
 
         with self._lock:
             existing_items = list(self._items)
@@ -258,12 +262,11 @@ class CheckPodManager:
         for ep in episodes_to_process:
             if ep.image_url:
                 page_image_urls[ep.id] = ep.image_url
-            if fast_images:
-                image_path = self._cached_image_path(ep.id)
-                if not image_path and ep.image_url:
-                    episodes_needing_images.append(ep)
-            else:
-                image_path = self._ensure_episode_image(ep, force=force_images)
+            if force_images:
+                self._delete_episode_images(ep.id)
+            image_path = self._cached_image_path(ep.id)
+            if not image_path and ep.image_url:
+                episodes_needing_images.append(ep)
 
             page_items.append(CatalogItem(
                 id=ep.id,
